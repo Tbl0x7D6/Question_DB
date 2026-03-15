@@ -49,18 +49,24 @@ def aggregate_score_rows(csv_path: Path) -> list[dict]:
     return sorted(results, key=lambda item: (item["exam_session"], item["question_id"]))
 
 
-def upsert_stats(db_path: Path, stats_rows: list[dict], stats_source: str, stats_version: str) -> int:
+def upsert_stats(
+    db_path: Path,
+    stats_rows: list[dict],
+    stats_source: str,
+    stats_version: str,
+    source_workbook_id: str | None = None,
+) -> int:
     now = utc_now_iso()
     with connect(db_path) as conn:
         for row in stats_rows:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO question_stats (
-                    question_id, exam_session, participant_count, avg_score, score_std,
+                    question_id, exam_session, source_workbook_id, participant_count, avg_score, score_std,
                     full_mark_rate, zero_score_rate, max_score, min_score,
                     stats_source, stats_version, created_at, updated_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     COALESCE((
                         SELECT created_at FROM question_stats
                         WHERE question_id = ? AND exam_session = ? AND stats_version = ?
@@ -70,6 +76,7 @@ def upsert_stats(db_path: Path, stats_rows: list[dict], stats_source: str, stats
                 (
                     row["question_id"],
                     row["exam_session"],
+                    source_workbook_id,
                     row["participant_count"],
                     row["avg_score"],
                     row["score_std"],

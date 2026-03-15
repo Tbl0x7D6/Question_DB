@@ -6,12 +6,17 @@ from pathlib import Path
 from .bundle import load_bundle, validate_bundle
 from .db import connect
 from .utils import dumps_json, sha256_file, utc_now_iso
+from .workbooks import upsert_score_workbook
 
 
-def _find_similar_questions(conn, plain_text: str, threshold: float = 0.92) -> list[str]:
+def _find_similar_questions(conn, search_text: str, threshold: float = 0.92) -> list[str]:
     matches: list[str] = []
-    for row in conn.execute("SELECT question_id, plain_text FROM questions").fetchall():
-        ratio = difflib.SequenceMatcher(a=plain_text, b=row["plain_text"]).ratio()
+    if not search_text:
+        return matches
+    for row in conn.execute("SELECT question_id, COALESCE(search_text, '') AS search_text FROM questions").fetchall():
+        if not row["search_text"]:
+            continue
+        ratio = difflib.SequenceMatcher(a=search_text, b=row["search_text"]).ratio()
         if ratio >= threshold:
             matches.append(f"{row['question_id']} ({ratio:.3f})")
     return matches
@@ -21,6 +26,10 @@ def _project_root_from_bundle(bundle_path: Path) -> Path:
     return bundle_path.resolve().parents[1]
 
 
+def _relative_to_project(project_root: Path, target_path: Path) -> str:
+    return target_path.resolve().relative_to(project_root).as_posix()
+
+
 def import_bundle(bundle_path: Path, db_path: Path, dry_run: bool = True, allow_similar: bool = False) -> dict:
     validation = validate_bundle(bundle_path)
     manifest, questions = load_bundle(bundle_path)
@@ -28,6 +37,7 @@ def import_bundle(bundle_path: Path, db_path: Path, dry_run: bool = True, allow_
     errors = list(validation.errors)
     imported_questions = 0
     imported_assets = 0
+    imported_workbooks = 0
     started_at = utc_now_iso()
     finished_at = started_at
     project_root = _project_root_from_bundle(bundle_path)
@@ -43,9 +53,9 @@ def import_bundle(bundle_path: Path, db_path: Path, dry_run: bool = True, allow_
                 errors.append(
                     f"题号冲突: 同一试卷 {paper['paper_id']} 的题号 {question['question_no']} 已被 {existing['question_id']} 使用。"
                 )
-            similar = _find_similar_questions(conn, question["plain_text"])
+            similar = _find_similar_questions(conn, question.get("search_text", ""))
             if similar and question["question_id"] not in {item.split()[0] for item in similar}:
-                message = f"{question['question_id']} 与已有题目文本高度相似: {', '.join(similar)}"
+                message = f"{question['question_id']} 与已有题目文本索引高度相似: {', '.join(similar)}"
                 if allow_similar:
                     warnings.append(message)
                 else:
@@ -60,19 +70,34 @@ def import_bundle(bundle_path: Path, db_path: Path, dry_run: bool = True, allow_
         }
         if not errors and not dry_run:
             now = utc_now_iso()
+            question_index = [
+                {
+                    "paper_index": question["paper_index"],
+                    "question_id": question["question_id"],
+                    "question_no": question["question_no"],
+                    "latex_path": question["latex_path"],
+                }
+                for question in sorted(questions, key=lambda item: item["paper_index"])
+            ]
+            paper_latex_path = _relative_to_project(project_root, bundle_path / paper["paper_latex_path"])
+            source_pdf_path = None
+            if paper.get("source_pdf_path"):
+                source_pdf_path = _relative_to_project(project_root, bundle_path / paper["source_pdf_path"])
             conn.execute(
                 """
                 INSERT OR REPLACE INTO papers (
-                    paper_id, year, stage, title, source_pdf_path, is_official, notes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM papers WHERE paper_id = ?), ?), ?)
+                    paper_id, edition, paper_type, title, paper_latex_path, source_pdf_path,
+                    question_index_json, notes, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE((SELECT created_at FROM papers WHERE paper_id = ?), ?), ?)
                 """,
                 (
                     paper["paper_id"],
-                    paper["year"],
-                    paper["stage"],
+                    paper["edition"],
+                    paper["paper_type"],
                     paper["title"],
-                    paper.get("source_pdf_path"),
-                    1 if paper.get("is_official", True) else 0,
+                    paper_latex_path,
+                    source_pdf_path,
+                    dumps_json(question_index),
                     paper.get("notes"),
                     paper["paper_id"],
                     now,
@@ -80,12 +105,16 @@ def import_bundle(bundle_path: Path, db_path: Path, dry_run: bool = True, allow_
                 ),
             )
             for question in questions:
+                latex_path = _relative_to_project(project_root, bundle_path / question["latex_path"])
+                answer_latex_path = None
+                if question.get("answer_latex_path"):
+                    answer_latex_path = _relative_to_project(project_root, bundle_path / question["answer_latex_path"])
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO questions (
-                        question_id, paper_id, question_no, category, latex_body, plain_text,
-                        answer_latex, answer_text, status, source_page_start, source_page_end,
-                        tags_json, created_at, updated_at
+                        question_id, paper_id, paper_index, question_no, category,
+                        latex_path, answer_latex_path, latex_anchor, search_text,
+                        status, tags_json, notes, created_at, updated_at
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                         COALESCE((SELECT created_at FROM questions WHERE question_id = ?), ?), ?
@@ -94,16 +123,16 @@ def import_bundle(bundle_path: Path, db_path: Path, dry_run: bool = True, allow_
                     (
                         question["question_id"],
                         paper["paper_id"],
+                        question["paper_index"],
                         question["question_no"],
                         question["category"],
-                        question["latex_body"],
-                        question["plain_text"],
-                        question.get("answer_latex"),
-                        question.get("answer_text"),
+                        latex_path,
+                        answer_latex_path,
+                        question.get("latex_anchor"),
+                        question.get("search_text"),
                         question["status"],
-                        question["source_pages"]["start"],
-                        question["source_pages"]["end"],
                         dumps_json(question.get("tags", [])),
+                        question.get("notes"),
                         question["question_id"],
                         now,
                         now,
@@ -132,8 +161,11 @@ def import_bundle(bundle_path: Path, db_path: Path, dry_run: bool = True, allow_
                         ),
                     )
                     imported_assets += 1
-            finished_at = utc_now_iso()
             conn.commit()
+            for workbook in manifest.get("score_workbooks", []):
+                upsert_score_workbook(db_path, paper_id=paper["paper_id"], workbook=workbook, bundle_path=bundle_path)
+                imported_workbooks += 1
+            finished_at = utc_now_iso()
         else:
             finished_at = utc_now_iso()
 
@@ -149,7 +181,7 @@ def import_bundle(bundle_path: Path, db_path: Path, dry_run: bool = True, allow_
                 str(bundle_path.resolve()),
                 1 if dry_run else 0,
                 status,
-                len(questions),
+                len(questions) + len(manifest.get("score_workbooks", [])),
                 len(warnings),
                 len(errors),
                 dumps_json(details),
@@ -166,6 +198,7 @@ def import_bundle(bundle_path: Path, db_path: Path, dry_run: bool = True, allow_
         "question_count": len(questions),
         "imported_questions": imported_questions,
         "imported_assets": imported_assets,
+        "imported_workbooks": imported_workbooks,
         "warnings": warnings,
         "errors": errors,
     }

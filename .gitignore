@@ -14,6 +14,7 @@ build/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+data/tmp*/
 !data/.gitkeep
 exports/*.jsonl
 exports/*.csv
@@ -21,6 +22,7 @@ exports/*.csv
 # Generated reports
 /docs/material_inventory.csv
 /docs/quality_report.json
+/docs/quality_report*.json
 
 # Environment and local deployment secrets
 .env

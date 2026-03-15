@@ -4,11 +4,12 @@ SCHEMA_STATEMENTS = [
     """
     CREATE TABLE IF NOT EXISTS papers (
         paper_id TEXT PRIMARY KEY,
-        year INTEGER NOT NULL,
-        stage TEXT NOT NULL,
+        edition INTEGER NOT NULL,
+        paper_type TEXT NOT NULL CHECK(paper_type IN ('regular', 'semifinal', 'final', 'other')),
         title TEXT NOT NULL,
+        paper_latex_path TEXT NOT NULL,
         source_pdf_path TEXT,
-        is_official INTEGER NOT NULL DEFAULT 1,
+        question_index_json TEXT NOT NULL DEFAULT '[]',
         notes TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -18,19 +19,20 @@ SCHEMA_STATEMENTS = [
     CREATE TABLE IF NOT EXISTS questions (
         question_id TEXT PRIMARY KEY,
         paper_id TEXT NOT NULL,
+        paper_index INTEGER NOT NULL,
         question_no TEXT NOT NULL,
         category TEXT NOT NULL CHECK(category IN ('theory', 'experiment')),
-        latex_body TEXT NOT NULL,
-        plain_text TEXT NOT NULL,
-        answer_latex TEXT,
-        answer_text TEXT,
+        latex_path TEXT NOT NULL,
+        answer_latex_path TEXT,
+        latex_anchor TEXT,
+        search_text TEXT,
         status TEXT NOT NULL CHECK(status IN ('raw', 'reviewed', 'published')),
-        source_page_start INTEGER,
-        source_page_end INTEGER,
         tags_json TEXT NOT NULL DEFAULT '[]',
+        notes TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (paper_id) REFERENCES papers(paper_id),
+        UNIQUE (paper_id, paper_index),
         UNIQUE (paper_id, question_no)
     )
     """,
@@ -48,10 +50,31 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS score_workbooks (
+        workbook_id TEXT PRIMARY KEY,
+        paper_id TEXT NOT NULL,
+        exam_session TEXT NOT NULL,
+        workbook_kind TEXT NOT NULL,
+        source_filename TEXT NOT NULL,
+        file_path TEXT,
+        mime_type TEXT NOT NULL,
+        sheet_names_json TEXT NOT NULL DEFAULT '[]',
+        file_size INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        workbook_blob BLOB NOT NULL,
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (paper_id) REFERENCES papers(paper_id),
+        UNIQUE (paper_id, exam_session, source_filename)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS question_stats (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         question_id TEXT NOT NULL,
         exam_session TEXT NOT NULL,
+        source_workbook_id TEXT,
         participant_count INTEGER NOT NULL,
         avg_score REAL NOT NULL,
         score_std REAL NOT NULL,
@@ -64,6 +87,7 @@ SCHEMA_STATEMENTS = [
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (question_id) REFERENCES questions(question_id),
+        FOREIGN KEY (source_workbook_id) REFERENCES score_workbooks(workbook_id),
         UNIQUE (question_id, exam_session, stats_version)
     )
     """,
@@ -102,4 +126,5 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_questions_paper ON questions(paper_id)",
     "CREATE INDEX IF NOT EXISTS idx_question_stats_question ON question_stats(question_id)",
     "CREATE INDEX IF NOT EXISTS idx_question_assets_question ON question_assets(question_id)",
+    "CREATE INDEX IF NOT EXISTS idx_score_workbooks_paper ON score_workbooks(paper_id)",
 ]

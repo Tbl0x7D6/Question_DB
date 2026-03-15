@@ -19,15 +19,28 @@ class StatsAndDifficultyTests(unittest.TestCase):
         import_bundle(bundle, db_path=db_path, dry_run=False)
         rows = aggregate_score_rows(csv_path)
         self.assertEqual(len(rows), 3)
-        upsert_stats(db_path, rows, stats_source="sample", stats_version="v1")
+        upsert_stats(
+            db_path,
+            rows,
+            stats_source="sample",
+            stats_version="v1",
+            source_workbook_id="WB-CPHOS-18-DEMO-INDEX",
+        )
         updated = update_difficulty_scores(db_path, method_version="test-v1")
         self.assertEqual(updated, 3)
         with connect(db_path) as conn:
+            stat_row = conn.execute(
+                "SELECT source_workbook_id, participant_count, avg_score FROM question_stats WHERE question_id = ?",
+                ("QB-2024-E-03",),
+            ).fetchone()
             stat_count = conn.execute("SELECT COUNT(*) FROM question_stats").fetchone()[0]
             difficulty = conn.execute(
                 "SELECT derived_score FROM difficulty_scores WHERE question_id = 'QB-2024-E-03'"
             ).fetchone()[0]
         self.assertEqual(stat_count, 3)
+        self.assertEqual(stat_row["source_workbook_id"], "WB-CPHOS-18-DEMO-INDEX")
+        self.assertGreater(stat_row["participant_count"], 0)
+        self.assertGreater(stat_row["avg_score"], 0.0)
         self.assertGreaterEqual(difficulty, 0.0)
 
 

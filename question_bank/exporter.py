@@ -10,10 +10,11 @@ from .db import connect
 def _question_payload(conn, include_answers: bool) -> list[dict]:
     rows = conn.execute(
         """
-        SELECT q.*, p.title AS paper_title, p.year, p.stage
+        SELECT q.*, p.title AS paper_title, p.edition, p.paper_type, p.paper_latex_path,
+               p.source_pdf_path, p.question_index_json
         FROM questions q
         JOIN papers p ON p.paper_id = q.paper_id
-        ORDER BY p.year, p.paper_id, q.question_no
+        ORDER BY p.edition, p.paper_id, q.paper_index
         """
     ).fetchall()
     payload: list[dict] = []
@@ -29,7 +30,7 @@ def _question_payload(conn, include_answers: bool) -> list[dict]:
         ).fetchall()
         stats = conn.execute(
             """
-            SELECT exam_session, participant_count, avg_score, score_std, full_mark_rate,
+            SELECT exam_session, source_workbook_id, participant_count, avg_score, score_std, full_mark_rate,
                    zero_score_rate, max_score, min_score, stats_source, stats_version
             FROM question_stats
             WHERE question_id = ?
@@ -37,25 +38,40 @@ def _question_payload(conn, include_answers: bool) -> list[dict]:
             """,
             (row["question_id"],),
         ).fetchall()
+        workbooks = conn.execute(
+            """
+            SELECT workbook_id, exam_session, workbook_kind, source_filename, file_path, sheet_names_json
+            FROM score_workbooks
+            WHERE paper_id = ?
+            ORDER BY exam_session, workbook_id
+            """,
+            (row["paper_id"],),
+        ).fetchall()
         item = {
             "question_id": row["question_id"],
             "paper_id": row["paper_id"],
             "paper_title": row["paper_title"],
-            "year": row["year"],
-            "stage": row["stage"],
+            "edition": row["edition"],
+            "paper_type": row["paper_type"],
+            "paper_latex_path": row["paper_latex_path"],
+            "source_pdf_path": row["source_pdf_path"],
+            "paper_question_index": json.loads(row["question_index_json"]),
+            "paper_index": row["paper_index"],
             "question_no": row["question_no"],
             "category": row["category"],
-            "latex_body": row["latex_body"],
-            "plain_text": row["plain_text"],
+            "latex_path": row["latex_path"],
+            "latex_anchor": row["latex_anchor"],
+            "search_text": row["search_text"],
             "status": row["status"],
-            "source_pages": {"start": row["source_page_start"], "end": row["source_page_end"]},
             "tags": json.loads(row["tags_json"]),
             "assets": [dict(asset) for asset in assets],
             "stats": [dict(stat) for stat in stats],
+            "score_workbooks": [
+                {**dict(workbook), "sheet_names": json.loads(workbook["sheet_names_json"])} for workbook in workbooks
+            ],
         }
         if include_answers:
-            item["answer_latex"] = row["answer_latex"]
-            item["answer_text"] = row["answer_text"]
+            item["answer_latex_path"] = row["answer_latex_path"]
         payload.append(item)
     return payload
 
@@ -77,24 +93,26 @@ def export_csv(db_path: Path, output_path: Path, include_answers: bool) -> int:
             fieldnames=[
                 "question_id",
                 "paper_id",
+                "paper_index",
                 "question_no",
                 "category",
                 "status",
-                "year",
-                "stage",
-                "plain_text",
-                "answer_text",
+                "edition",
+                "paper_type",
+                "latex_path",
+                "answer_latex_path",
+                "search_text",
                 "tags",
             ],
         )
         writer.writeheader()
         rows = conn.execute(
             """
-            SELECT q.question_id, q.paper_id, q.question_no, q.category, q.status,
-                   p.year, p.stage, q.plain_text, q.answer_text, q.tags_json
+            SELECT q.question_id, q.paper_id, q.paper_index, q.question_no, q.category, q.status,
+                   p.edition, p.paper_type, q.latex_path, q.answer_latex_path, q.search_text, q.tags_json
             FROM questions q
             JOIN papers p ON p.paper_id = q.paper_id
-            ORDER BY p.year, q.question_no
+            ORDER BY p.edition, q.paper_index
             """
         ).fetchall()
         for row in rows:
@@ -102,13 +120,15 @@ def export_csv(db_path: Path, output_path: Path, include_answers: bool) -> int:
                 {
                     "question_id": row["question_id"],
                     "paper_id": row["paper_id"],
+                    "paper_index": row["paper_index"],
                     "question_no": row["question_no"],
                     "category": row["category"],
                     "status": row["status"],
-                    "year": row["year"],
-                    "stage": row["stage"],
-                    "plain_text": row["plain_text"],
-                    "answer_text": row["answer_text"] if include_answers else "",
+                    "edition": row["edition"],
+                    "paper_type": row["paper_type"],
+                    "latex_path": row["latex_path"],
+                    "answer_latex_path": row["answer_latex_path"] if include_answers else "",
+                    "search_text": row["search_text"],
                     "tags": row["tags_json"],
                 }
             )

@@ -18,10 +18,17 @@ def main() -> None:
     parser.add_argument("--db-path", default=str(DEFAULT_DB_PATH), help="SQLite 数据库路径。")
     parser.add_argument("--stats-source", default="manual_csv", help="统计来源标签。")
     parser.add_argument("--stats-version", default="v1", help="统计版本标签。")
+    parser.add_argument("--source-workbook-id", default="", help="关联的 score_workbook_id。")
     args = parser.parse_args()
 
     rows = aggregate_score_rows(args.csv_path)
-    count = upsert_stats(Path(args.db_path), rows, stats_source=args.stats_source, stats_version=args.stats_version)
+    count = upsert_stats(
+        Path(args.db_path),
+        rows,
+        stats_source=args.stats_source,
+        stats_version=args.stats_version,
+        source_workbook_id=args.source_workbook_id or None,
+    )
     print(f"已写入 {count} 条统计记录。")
 
 
