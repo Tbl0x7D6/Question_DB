@@ -133,6 +133,23 @@ curl -X POST http://127.0.0.1:8080/questions \
 
 `DELETE /questions/{question_id}`
 
+### 批量下载题目包
+
+`POST /questions/bundles`
+
+请求体示例：
+
+```json
+{
+  "question_ids": [
+    "8db0d12e-2968-4ede-86d5-1dc5ff0a5d10",
+    "e21ed70d-cd18-45cc-89ab-2785d07f4de7"
+  ]
+}
+```
+
+返回一个 zip，根目录附带 `manifest.json`，并按 `question_id/` 目录分组题目文件。
+
 ### 创建试卷
 
 `POST /papers`
@@ -162,12 +179,31 @@ curl -X POST http://127.0.0.1:8080/questions \
 
 `DELETE /papers/{paper_id}`
 
+### 批量下载试卷包
+
+`POST /papers/bundles`
+
+请求体示例：
+
+```json
+{
+  "paper_ids": [
+    "79bf1ce3-6b61-4e5f-82ab-29e5c7cb2942",
+    "8ff430a0-92aa-463b-bf0f-b244a6697bf4"
+  ]
+}
+```
+
+返回一个 zip，根目录附带 `manifest.json`，并按 `paper_id/question_id/` 目录展开题目文件。
+
 ### 查询与运维
 
 - `GET /papers`
 - `GET /papers/{paper_id}`
+- `POST /papers/bundles`
 - `GET /questions`
 - `GET /questions/{question_id}`
+- `POST /questions/bundles`
 - `POST /exports/run`
 - `POST /quality-checks/run`
 

@@ -27,7 +27,7 @@ pub struct QuestionAlgorithmScore {
     pub(crate) score: i32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuestionAssetRef {
     pub(crate) path: String,
     pub(crate) file_kind: String,

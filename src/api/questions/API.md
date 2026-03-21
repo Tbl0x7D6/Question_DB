@@ -79,3 +79,22 @@
 ### `GET /questions/{question_id}`
 
 返回单个题目的完整 metadata、文件引用和所属试卷。
+
+### `POST /questions/bundles`
+
+按给定题目列表批量打包下载。
+
+请求体：
+
+```json
+{
+  "question_ids": ["uuid-1", "uuid-2", "uuid-3"]
+}
+```
+
+返回值：
+
+- 响应体是一个 `application/zip`
+- zip 根目录包含 `manifest.json`
+- 每个题目使用自己的 `question_id/` 目录分组
+- 目录内包含原始 `.tex` 和 `assets/` 资源文件

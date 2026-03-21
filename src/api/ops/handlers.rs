@@ -1,21 +1,49 @@
 use std::{fs, path::Path};
 
 use anyhow::Context;
-use axum::{extract::State, Json};
+use axum::{extract::State, response::Response, Json};
 use serde_json::json;
 
 use super::{
+    bundles::{build_paper_bundle_response, build_question_bundle_response},
     exports::{default_export_path, ensure_parent_dir, export_csv, export_jsonl, exported_path},
-    models::{ExportFormat, ExportRequest, ExportResponse, QualityCheckRequest},
+    models::{
+        ExportFormat, ExportRequest, ExportResponse, PaperBundleRequest, QualityCheckRequest,
+        QuestionBundleRequest,
+    },
     quality::build_quality_report,
 };
 use crate::api::{
     shared::{
-        error::ApiResult,
+        error::{ApiError, ApiResult},
         utils::{canonical_or_original, expand_path},
     },
     AppState,
 };
+
+pub(crate) async fn download_questions_bundle(
+    State(state): State<AppState>,
+    Json(request): Json<QuestionBundleRequest>,
+) -> Result<Response, ApiError> {
+    let question_ids = request
+        .normalize()
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    build_question_bundle_response(&state.pool, &question_ids)
+        .await
+        .map_err(map_bundle_error)
+}
+
+pub(crate) async fn download_papers_bundle(
+    State(state): State<AppState>,
+    Json(request): Json<PaperBundleRequest>,
+) -> Result<Response, ApiError> {
+    let paper_ids = request
+        .normalize()
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    build_paper_bundle_response(&state.pool, &paper_ids)
+        .await
+        .map_err(map_bundle_error)
+}
 
 pub(crate) async fn run_export(
     State(state): State<AppState>,
@@ -69,4 +97,21 @@ pub(crate) async fn run_quality_check(
         "output_path": canonical_or_original(Path::new(&output_path)),
         "report": report,
     })))
+}
+
+fn map_bundle_error(err: anyhow::Error) -> ApiError {
+    let message = err.to_string();
+    if message.starts_with("question not found:")
+        || message.starts_with("paper not found:")
+        || message.starts_with("question_ids")
+        || message.starts_with("paper_ids")
+        || message.starts_with("invalid question_ids entry:")
+        || message.starts_with("invalid paper_ids entry:")
+        || message.starts_with("duplicate question_ids entry:")
+        || message.starts_with("duplicate paper_ids entry:")
+    {
+        ApiError::bad_request(message)
+    } else {
+        ApiError::internal(message)
+    }
 }

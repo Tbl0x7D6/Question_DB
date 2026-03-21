@@ -52,3 +52,22 @@
   "status": "deleted"
 }
 ```
+
+### `POST /papers/bundles`
+
+按给定试卷列表批量打包下载。
+
+请求体：
+
+```json
+{
+  "paper_ids": ["uuid-1", "uuid-2"]
+}
+```
+
+返回值：
+
+- 响应体是一个 `application/zip`
+- zip 根目录包含 `manifest.json`
+- 每个试卷使用自己的 `paper_id/` 目录分组
+- 每个试卷目录下再按 `question_id/` 展开题目的 `.tex` 和 `assets/` 文件

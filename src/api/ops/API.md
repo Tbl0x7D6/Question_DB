@@ -2,6 +2,11 @@
 
 ## Endpoints
 
+题目和试卷的批量打包下载接口见：
+
+- [Questions API](/home/be/Question_DB/src/api/questions/API.md)
+- [Papers API](/home/be/Question_DB/src/api/papers/API.md)
+
 ### `POST /exports/run`
 
 导出题目数据。
