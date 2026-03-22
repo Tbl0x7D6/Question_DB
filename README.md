@@ -78,6 +78,7 @@ question.zip
 - tex 和 `assets/` 下的资源文件都会写入 `objects` 表
 - 上传题目时必须额外提供一个非空的 `description`
 - `description` 支持中文，并可直接参与 `GET /questions?q=...` 的模糊匹配
+- `description` 会参与 bundle 目录命名，因此不能包含 `/ \\ : * ? " < > |`，不能是 `.`、`..`，也不能以 `.` 结尾
 - 题目 metadata 在上传时其余字段使用默认值：
   - `category = "none"`
   - `tags = []`
@@ -124,7 +125,7 @@ curl -X POST http://127.0.0.1:8080/questions \
 说明：
 
 - 请求体支持部分更新
-- `description` 如果出现在更新请求里，必须是非空字符串
+- `description` 如果出现在更新请求里，必须是非空字符串，并满足上面的文件名安全限制
 - `tags` 传空数组会清空
 - `difficulty` 传 `{}` 会清空整个难度信息
 - `difficulty.human` 和 `difficulty.algorithm.*` 都要求在 `1..=10`
@@ -150,7 +151,7 @@ curl -X POST http://127.0.0.1:8080/questions \
 }
 ```
 
-返回一个 zip，根目录附带 `manifest.json`，并按 `question_id/` 目录分组题目文件。
+返回一个 zip，根目录附带 `manifest.json`，并按 `description_uuid前缀/` 目录分组题目文件。
 
 ### 创建试卷
 
@@ -175,6 +176,7 @@ curl -X POST http://127.0.0.1:8080/questions \
 说明：
 
 - `description` 为必填，必须是非空字符串
+- `description` 同样会参与 bundle 目录命名，因此也要满足上面的文件名安全限制
 - `GET /papers` 支持通过 `question_id`、`paper_type`、`category`、`tag`、`q`、`limit`、`offset` 做组合查询
 - `q` 只会模糊匹配试卷的 `description`
 
@@ -201,7 +203,7 @@ curl -X POST http://127.0.0.1:8080/questions \
 }
 ```
 
-返回一个 zip，根目录附带 `manifest.json`，并按 `paper_id/question_id/` 目录展开题目文件。
+返回一个 zip，根目录附带 `manifest.json`，并按 `paperDescription_uuid前缀/questionDescription_uuid前缀/` 目录展开题目文件。
 
 ### 查询与运维
 

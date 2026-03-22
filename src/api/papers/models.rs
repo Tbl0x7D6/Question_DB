@@ -4,6 +4,9 @@ use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::api::questions::models::validate_question_category;
+use crate::api::shared::utils::{
+    normalize_bundle_description, normalize_optional_bundle_description,
+};
 
 pub(crate) const PAPER_TYPES: [&str; 4] = ["regular", "semifinal", "final", "other"];
 
@@ -174,11 +177,7 @@ fn normalize_paper_type(value: &str) -> Result<String> {
 }
 
 fn normalize_required_text(field: &str, value: &str) -> Result<String> {
-    let normalized = value.trim().to_string();
-    if normalized.is_empty() {
-        bail!("{field} must not be empty");
-    }
-    Ok(normalized)
+    normalize_bundle_description(field, value)
 }
 
 fn normalize_optional_text(value: String) -> Option<String> {
@@ -191,14 +190,7 @@ fn normalize_optional_text(value: String) -> Option<String> {
 }
 
 fn normalize_required_plaintext(field: &str, value: Option<String>) -> Result<String> {
-    let Some(text) = value else {
-        bail!("{field} must not be null");
-    };
-    let trimmed = text.trim().to_string();
-    if trimmed.is_empty() {
-        bail!("{field} must not be empty");
-    }
-    Ok(trimmed)
+    normalize_optional_bundle_description(field, value)
 }
 
 fn normalize_question_ids(question_ids: Vec<String>) -> Result<Vec<String>> {

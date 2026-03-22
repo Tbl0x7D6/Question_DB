@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, HashSet};
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::api::shared::utils::normalize_optional_bundle_description;
+
 pub(crate) const QUESTION_CATEGORIES: [&str; 3] = ["none", "T", "E"];
 pub(crate) const QUESTION_STATUSES: [&str; 3] = ["none", "reviewed", "used"];
 
@@ -249,14 +251,7 @@ fn normalize_status(value: &str) -> Result<String> {
 }
 
 fn normalize_required_plaintext(field: &str, value: Option<String>) -> Result<String> {
-    let Some(text) = value else {
-        bail!("{field} must not be null");
-    };
-    let trimmed = text.trim().to_string();
-    if trimmed.is_empty() {
-        bail!("{field} must not be empty");
-    }
-    Ok(trimmed)
+    normalize_optional_bundle_description(field, value)
 }
 
 fn normalize_optional_plaintext(value: String) -> Option<String> {

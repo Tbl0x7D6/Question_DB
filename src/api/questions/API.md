@@ -10,6 +10,8 @@
 - 必填字段：`description`
   - 必须是非空字符串
   - 支持中文
+  - 不能包含 `/ \\ : * ? " < > |`
+  - 不能是 `.`、`..`，也不能以 `.` 结尾
 - 大小限制：20 MiB
 - zip 根目录必须包含且只包含：
   - 恰好一个 `.tex` 文件
@@ -40,6 +42,7 @@
 
 - `category`: `none` | `T` | `E`
 - `description`: 非空字符串，不能传 `null` 或空串
+  - 同样不能包含 `/ \\ : * ? " < > |`
 - `tags`: 字符串数组，会去重；空数组表示清空
 - `status`: `none` | `reviewed` | `used`
 - `difficulty`: 对象
@@ -98,5 +101,5 @@
 
 - 响应体是一个 `application/zip`
 - zip 根目录包含 `manifest.json`
-- 每个题目使用自己的 `question_id/` 目录分组
+- 每个题目使用 `description_uuid前缀/` 目录分组，例如 `热学标定 gamma_550e84/`
 - 目录内包含原始 `.tex` 和 `assets/` 资源文件

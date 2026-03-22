@@ -26,6 +26,7 @@ use crate::api::{
             map_paper_question_summary, map_question_detail,
         },
     },
+    shared::utils::bundle_directory_name,
 };
 
 #[derive(Debug, Serialize)]
@@ -106,7 +107,7 @@ pub(crate) async fn build_question_bundle_response(
 
     for question_id in question_ids {
         let bundle = load_question_bundle_data(pool, question_id).await?;
-        let directory = question_id.clone();
+        let directory = bundle_directory_name(&bundle.metadata.description, question_id);
         let manifest_files =
             write_question_bundle_files(pool, &mut writer, &bundle.files, &directory).await?;
         manifest_items.push(QuestionBundleManifestItem {
@@ -144,11 +145,17 @@ pub(crate) async fn build_paper_bundle_response(
 
     for paper_id in paper_ids {
         let bundle = load_paper_bundle_data(pool, paper_id).await?;
-        let directory = paper_id.clone();
+        let directory = bundle_directory_name(&bundle.metadata.description, paper_id);
         let mut question_entries = Vec::with_capacity(bundle.questions.len());
 
         for question in bundle.questions {
-            let question_directory = format!("{directory}/{}", question.metadata.question_id);
+            let question_directory = format!(
+                "{directory}/{}",
+                bundle_directory_name(
+                    &question.metadata.description,
+                    &question.metadata.question_id
+                )
+            );
             let manifest_files = write_question_bundle_files(
                 pool,
                 &mut writer,

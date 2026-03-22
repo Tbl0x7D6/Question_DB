@@ -21,6 +21,7 @@ use super::{
 };
 use crate::api::{
     shared::error::{ApiError, ApiResult},
+    shared::utils::normalize_bundle_description,
     AppState,
 };
 
@@ -103,10 +104,12 @@ pub(crate) async fn create_question(
         ));
     }
     let description = description
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             ApiError::bad_request("multipart form must include a non-empty 'description' field")
+        })
+        .and_then(|value| {
+            normalize_bundle_description("description", &value)
+                .map_err(|err| ApiError::bad_request(err.to_string()))
         })?;
     if bytes.len() > MAX_UPLOAD_BYTES {
         return Err(ApiError::bad_request("uploaded zip exceeds 20 MiB limit"));

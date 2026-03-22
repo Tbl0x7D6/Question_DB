@@ -504,7 +504,17 @@ def validate_question_bundle(manifest: dict, names: list[str], question_ids: lis
     bundled_ids = [item["question_id"] for item in manifest["questions"]]
     ensure(bundled_ids == question_ids, "question bundle ids should preserve request order")
     for item in manifest["questions"]:
+        expected_prefix = f"{item['metadata']['description']}_"
+        ensure(item["directory"].startswith(expected_prefix), "question bundle directory should start with description")
+        ensure(
+            item["directory"] != item["question_id"],
+            "question bundle directory should not use raw question id",
+        )
         file_paths = {entry["zip_path"] for entry in item["files"]}
+        ensure(
+            all(path.startswith(f"{item['directory']}/") for path in file_paths),
+            "question bundle files should live under the description directory",
+        )
         ensure(any(path.endswith(".tex") for path in file_paths), "question bundle should include tex")
         ensure(any("/assets/" in path for path in file_paths), "question bundle should include assets")
         ensure(all(path in names for path in file_paths), "question bundle manifest paths must exist in zip")
@@ -516,9 +526,17 @@ def validate_paper_bundle(manifest: dict, names: list[str], paper_ids: list[str]
     bundled_ids = [item["paper_id"] for item in manifest["papers"]]
     ensure(bundled_ids == paper_ids, "paper bundle ids should preserve request order")
     for item in manifest["papers"]:
+        paper_prefix = f"{item['metadata']['description']}_"
+        ensure(item["directory"].startswith(paper_prefix), "paper bundle directory should start with description")
+        ensure(item["directory"] != item["paper_id"], "paper bundle directory should not use raw paper id")
         ensure(item["questions"], "paper bundle should include at least one question")
         for question in item["questions"]:
-            expected_prefix = f"{item['paper_id']}/{question['question_id']}/"
+            question_dir = question["directory"]
+            ensure(
+                question_dir.startswith(f"{item['directory']}/"),
+                "paper question directory should live under the paper directory",
+            )
+            expected_prefix = f"{question_dir}/"
             ensure(
                 any(name.startswith(expected_prefix) for name in names),
                 "paper bundle should include question folder contents",
@@ -650,6 +668,15 @@ def main() -> None:
             file_path=zip_paths[0],
             content_type="application/zip",
         )
+        multipart_request(
+            "POST /questions invalid description",
+            400,
+            path="/questions",
+            text_fields={"description": "bad/name"},
+            field_name="file",
+            file_path=zip_paths[0],
+            content_type="application/zip",
+        )
         for spec, zip_path in zip(QUESTION_SPECS, zip_paths):
             _, body, _ = multipart_request(
                 f"POST /questions ({spec['slug']})",
@@ -723,6 +750,21 @@ def main() -> None:
         )
 
         print_step("[6/8] Create papers and validate bundle downloads")
+        json_request(
+            "POST /papers invalid description",
+            400,
+            method="POST",
+            path="/papers",
+            payload={
+                "edition": "2026",
+                "paper_type": "regular",
+                "description": "bad/name",
+                "question_ids": [
+                    question_by_slug["mechanics"],
+                    question_by_slug["optics"],
+                ],
+            },
+        )
         _, body, _ = json_request(
             "POST /papers (mock-a)",
             200,
@@ -797,6 +839,14 @@ def main() -> None:
             },
         )
         ensure("综合训练重排卷" in body, "paper patch should update description")
+
+        json_request(
+            f"PATCH /papers/{paper_a_id} invalid description",
+            400,
+            method="PATCH",
+            path=f"/papers/{paper_a_id}",
+            payload={"description": "bad/name"},
+        )
 
         _, body, _ = perform_request(
             "GET /questions?paper_id={paper_a}",
