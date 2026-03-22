@@ -33,7 +33,7 @@ impl QuestionsParams {
                    q.source_tex_path,
                    q.category,
                    q.status,
-                   COALESCE(q.notes, '') AS notes,
+                   COALESCE(q.description, '') AS description,
                    q.difficulty_human,
                    q.difficulty_notes,
                    to_char(q.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at,
@@ -71,14 +71,9 @@ impl QuestionsParams {
         if let Some(search) = &self.q {
             let needle = format!("%{search}%");
             builder
-                .push(" AND (q.question_id::text ILIKE ")
-                .push_bind(needle.clone())
-                .push(" OR COALESCE(q.notes, '') ILIKE ")
-                .push_bind(needle.clone())
-                .push(" OR COALESCE(q.source_tex_path, '') ILIKE ")
-                .push_bind(needle)
-                .push(')');
-            bind_count += 3;
+                .push(" AND COALESCE(q.description, '') ILIKE ")
+                .push_bind(needle);
+            bind_count += 1;
         }
 
         let limit = self.normalized_limit();
@@ -139,7 +134,7 @@ pub(crate) async fn execute_questions_query(
     }
     if let Some(search) = &params.q {
         let needle = format!("%{search}%");
-        query = query.bind(needle.clone()).bind(needle.clone()).bind(needle);
+        query = query.bind(needle);
     }
     debug_assert_eq!(plan.bind_count, count_question_binds(params));
     query
@@ -154,7 +149,7 @@ pub(crate) fn count_question_binds(params: &QuestionsParams) -> usize {
         + usize::from(params.tag.is_some())
         + usize::from(params.paper_id.is_some())
         + usize::from(params.paper_type.is_some())
-        + params.q.as_ref().map(|_| 3).unwrap_or(0)
+        + params.q.as_ref().map(|_| 1).unwrap_or(0)
         + 2
 }
 
@@ -227,8 +222,7 @@ pub(crate) fn map_paper_summary(row: PgRow) -> PaperSummary {
         paper_id: row.get("paper_id"),
         edition: row.get("edition"),
         paper_type: row.get("paper_type"),
-        title: row.get("title"),
-        notes: row.get("notes"),
+        description: row.get("description"),
         question_count: row.get("question_count"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -257,7 +251,7 @@ pub(crate) fn map_question_summary(
         },
         category: row.get("category"),
         status: row.get("status"),
-        notes: row.get("notes"),
+        description: row.get("description"),
         tags,
         difficulty: QuestionDifficulty {
             human: row.get("difficulty_human"),
@@ -274,7 +268,6 @@ pub(crate) fn map_question_paper_ref(row: PgRow) -> QuestionPaperRef {
         paper_id: row.get("paper_id"),
         edition: row.get("edition"),
         paper_type: row.get("paper_type"),
-        title: row.get("title"),
         sort_order: row.get("sort_order"),
     }
 }
@@ -295,7 +288,7 @@ pub(crate) fn map_question_detail(
         },
         category: row.get("category"),
         status: row.get("status"),
-        notes: row.get("notes"),
+        description: row.get("description"),
         tags,
         difficulty: QuestionDifficulty {
             human: row.get("difficulty_human"),
@@ -314,8 +307,7 @@ pub(crate) fn map_paper_detail(row: PgRow, questions: Vec<PaperQuestionSummary>)
         paper_id: row.get("paper_id"),
         edition: row.get("edition"),
         paper_type: row.get("paper_type"),
-        title: row.get("title"),
-        notes: row.get("notes"),
+        description: row.get("description"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         questions,

@@ -32,6 +32,7 @@ struct LoadedQuestionZip {
 pub(crate) async fn import_question_zip(
     pool: &PgPool,
     file_name: Option<&str>,
+    description: &str,
     zip_bytes: Vec<u8>,
 ) -> Result<QuestionImportResponse> {
     if zip_bytes.is_empty() {
@@ -51,17 +52,18 @@ pub(crate) async fn import_question_zip(
     query(
         r#"
         INSERT INTO questions (
-            question_id, source_tex_path, category, status, notes,
+            question_id, source_tex_path, category, status, description,
             difficulty_human, difficulty_notes, created_at, updated_at
         )
         VALUES (
             $1::uuid, $2, 'none', 'none',
-            '', NULL, NULL, NOW(), NOW()
+            $3, NULL, NULL, NOW(), NOW()
         )
         "#,
     )
     .bind(&question_id)
     .bind(&loaded.tex_file.path)
+    .bind(description)
     .execute(&mut *tx)
     .await
     .context("insert uploaded question failed")?;

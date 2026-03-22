@@ -60,7 +60,7 @@ pub(crate) async fn export_jsonl(
     let rows = query(
         r#"
         SELECT question_id::text AS question_id, source_tex_path, category, status,
-               COALESCE(notes, '') AS notes,
+               COALESCE(description, '') AS description,
                difficulty_human, difficulty_notes,
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
@@ -99,7 +99,7 @@ pub(crate) async fn export_jsonl(
             },
             "category": row.get::<String, _>("category"),
             "status": row.get::<String, _>("status"),
-            "notes": row.get::<String, _>("notes"),
+            "description": row.get::<String, _>("description"),
             "difficulty": QuestionDifficulty {
                 human: row.get("difficulty_human"),
                 algorithm: algorithms,
@@ -134,7 +134,7 @@ pub(crate) async fn export_csv(
     let rows = query(
         r#"
         SELECT question_id::text AS question_id, source_tex_path, category, status,
-               COALESCE(notes, '') AS notes,
+               COALESCE(description, '') AS description,
                difficulty_human, difficulty_notes,
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
@@ -160,7 +160,7 @@ pub(crate) async fn export_csv(
         "source_tex_path",
         "category",
         "status",
-        "notes",
+        "description",
         "difficulty_human",
         "difficulty_algorithm",
         "difficulty_notes",
@@ -186,7 +186,7 @@ pub(crate) async fn export_csv(
             row.get::<String, _>("source_tex_path"),
             row.get::<String, _>("category"),
             row.get::<String, _>("status"),
-            row.get::<String, _>("notes"),
+            row.get::<String, _>("description"),
             row.get::<Option<i32>, _>("difficulty_human")
                 .map(|value| value.to_string())
                 .unwrap_or_default(),

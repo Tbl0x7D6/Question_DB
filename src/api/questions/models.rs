@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, HashSet};
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::api::shared::utils::normalize_optional_bundle_description;
+
 pub(crate) const QUESTION_CATEGORIES: [&str; 3] = ["none", "T", "E"];
 pub(crate) const QUESTION_STATUSES: [&str; 3] = ["none", "reviewed", "used"];
 
@@ -41,7 +43,7 @@ pub struct QuestionSummary {
     pub(crate) source: QuestionSourceRef,
     pub(crate) category: String,
     pub(crate) status: String,
-    pub(crate) notes: String,
+    pub(crate) description: String,
     pub(crate) tags: Vec<String>,
     pub(crate) difficulty: QuestionDifficulty,
     pub(crate) created_at: String,
@@ -53,7 +55,6 @@ pub struct QuestionPaperRef {
     pub(crate) paper_id: String,
     pub(crate) edition: Option<String>,
     pub(crate) paper_type: String,
-    pub(crate) title: String,
     pub(crate) sort_order: i32,
 }
 
@@ -64,7 +65,7 @@ pub struct QuestionDetail {
     pub(crate) source: QuestionSourceRef,
     pub(crate) category: String,
     pub(crate) status: String,
-    pub(crate) notes: String,
+    pub(crate) description: String,
     pub(crate) tags: Vec<String>,
     pub(crate) difficulty: QuestionDifficulty,
     pub(crate) created_at: String,
@@ -90,7 +91,7 @@ pub(crate) struct UpdateQuestionMetadataRequest {
     #[serde(default)]
     pub(crate) category: Option<String>,
     #[serde(default)]
-    pub(crate) notes: Option<Option<String>>,
+    pub(crate) description: Option<Option<String>>,
     #[serde(default)]
     pub(crate) tags: Option<Vec<String>>,
     #[serde(default)]
@@ -113,7 +114,7 @@ pub(crate) struct QuestionDifficultyPatch {
 #[derive(Debug)]
 pub(crate) struct NormalizedQuestionMetadataUpdate {
     pub(crate) category: Option<String>,
-    pub(crate) notes: Option<String>,
+    pub(crate) description: Option<String>,
     pub(crate) tags: Option<Vec<String>>,
     pub(crate) status: Option<String>,
     pub(crate) difficulty: Option<NormalizedQuestionDifficultyUpdate>,
@@ -158,13 +159,13 @@ pub(crate) fn validate_question_status(status: &str) -> Result<()> {
 impl UpdateQuestionMetadataRequest {
     pub(crate) fn normalize(self) -> Result<NormalizedQuestionMetadataUpdate> {
         if self.category.is_none()
-            && self.notes.is_none()
+            && self.description.is_none()
             && self.tags.is_none()
             && self.status.is_none()
             && self.difficulty.is_none()
         {
             return Err(anyhow!(
-                "request body must include at least one of: category, notes, tags, status, difficulty"
+                "request body must include at least one of: category, description, tags, status, difficulty"
             ));
         }
 
@@ -172,7 +173,10 @@ impl UpdateQuestionMetadataRequest {
             .category
             .map(|value| normalize_category(&value))
             .transpose()?;
-        let notes = self.notes.map(normalize_plaintext_to_string);
+        let description = self
+            .description
+            .map(|value| normalize_required_plaintext("description", value))
+            .transpose()?;
         let tags = self.tags.map(normalize_tags).transpose()?;
         let status = self
             .status
@@ -185,7 +189,7 @@ impl UpdateQuestionMetadataRequest {
 
         Ok(NormalizedQuestionMetadataUpdate {
             category,
-            notes,
+            description,
             tags,
             status,
             difficulty,
@@ -246,17 +250,8 @@ fn normalize_status(value: &str) -> Result<String> {
     Ok(normalized)
 }
 
-fn normalize_plaintext_to_string(value: Option<String>) -> String {
-    value
-        .and_then(|text| {
-            let trimmed = text.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        })
-        .unwrap_or_default()
+fn normalize_required_plaintext(field: &str, value: Option<String>) -> Result<String> {
+    normalize_optional_bundle_description(field, value)
 }
 
 fn normalize_optional_plaintext(value: String) -> Option<String> {
@@ -310,7 +305,7 @@ mod tests {
     fn update_request_normalizes_and_deduplicates_tags() {
         let request = UpdateQuestionMetadataRequest {
             category: Some(" T ".into()),
-            notes: Some(Some("  demo note  ".into())),
+            description: Some(Some("  demo note  ".into())),
             tags: Some(vec![" optics ".into(), "mechanics".into(), "optics".into()]),
             status: Some(" reviewed ".into()),
             difficulty: None,
@@ -318,7 +313,7 @@ mod tests {
 
         let normalized = request.normalize().expect("request should normalize");
         assert_eq!(normalized.category.as_deref(), Some("T"));
-        assert_eq!(normalized.notes.as_deref(), Some("demo note"));
+        assert_eq!(normalized.description.as_deref(), Some("demo note"));
         assert_eq!(
             normalized.tags.expect("tags should be present"),
             vec!["optics".to_string(), "mechanics".to_string()]
@@ -333,5 +328,16 @@ mod tests {
 
         let normalized = request.normalize().expect("request should normalize");
         assert!(normalized.difficulty.expect("difficulty update").clear_all);
+    }
+
+    #[test]
+    fn update_request_rejects_empty_or_null_description() {
+        let empty_request: UpdateQuestionMetadataRequest =
+            serde_json::from_str(r#"{"description":""}"#).expect("json should parse");
+        let null_request: UpdateQuestionMetadataRequest =
+            serde_json::from_str(r#"{"description":null}"#).expect("json should parse");
+
+        assert!(empty_request.normalize().is_err());
+        assert!(null_request.normalize().is_err());
     }
 }

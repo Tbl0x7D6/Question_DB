@@ -43,13 +43,14 @@ QUESTION_SPECS = [
         "zip_name": "question_mechanics.zip",
         "tex_name": "mechanics.tex",
         "tex_body": "\\section{Mechanics calibration}\nA cart slides on an incline.\n",
+        "create_description": "mechanics benchmark alpha",
         "assets": {
             "assets/diagram.txt": "incline-figure",
             "assets/data.csv": "time,velocity\n0,0\n1,3\n",
         },
         "patch": {
             "category": "T",
-            "notes": "mechanics benchmark alpha",
+            "description": "mechanics benchmark alpha",
             "tags": ["mechanics", "kinematics"],
             "status": "reviewed",
             "difficulty": {
@@ -64,13 +65,14 @@ QUESTION_SPECS = [
         "zip_name": "question_optics.zip",
         "tex_name": "optics.tex",
         "tex_body": "\\section{Optics setup}\nA lens forms an image on a screen.\n",
+        "create_description": "optics bundle beta",
         "assets": {
             "assets/lens.txt": "thin-lens",
             "assets/ray-path.txt": "ray-diagram",
         },
         "patch": {
             "category": "E",
-            "notes": "optics bundle beta",
+            "description": "optics bundle beta",
             "tags": ["optics", "lenses"],
             "status": "used",
             "difficulty": {
@@ -85,13 +87,14 @@ QUESTION_SPECS = [
         "zip_name": "question_thermal.zip",
         "tex_name": "thermal.tex",
         "tex_body": "\\section{Thermal equilibration}\nTwo bodies exchange heat.\n",
+        "create_description": "热学标定 gamma",
         "assets": {
             "assets/table.txt": "material,c\nCu,385\nAl,900\n",
             "assets/reference.txt": "thermal-reference",
         },
         "patch": {
             "category": "none",
-            "notes": "thermal calibration gamma",
+            "description": "热学标定 gamma",
             "tags": ["thermal", "calorimetry"],
             "status": "none",
             "difficulty": {
@@ -295,17 +298,31 @@ def multipart_request(
     expected_status: int,
     *,
     path: str,
+    text_fields: dict[str, str] | None,
     field_name: str,
     file_path: Path,
     content_type: str,
 ) -> tuple[int, str, dict[str, str]]:
     boundary = f"----QBApiBoundary{uuid.uuid4().hex}"
     file_bytes = file_path.read_bytes()
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="{field_name}"; filename="{file_path.name}"\r\n'
-        f"Content-Type: {content_type}\r\n\r\n"
-    ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    body = bytearray()
+    for name, value in (text_fields or {}).items():
+        body.extend(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+        )
+    body.extend(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{file_path.name}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8")
+    )
+    body.extend(file_bytes)
+    body.extend(f"\r\n--{boundary}--\r\n".encode("utf-8"))
 
     return perform_request(
         label,
@@ -313,8 +330,8 @@ def multipart_request(
         method="POST",
         path=path,
         headers={"content-type": f"multipart/form-data; boundary={boundary}"},
-        body=body,
-        request_body={"file": str(file_path)},
+        body=bytes(body),
+        request_body={"file": str(file_path), **(text_fields or {})},
     )
 
 
@@ -487,7 +504,17 @@ def validate_question_bundle(manifest: dict, names: list[str], question_ids: lis
     bundled_ids = [item["question_id"] for item in manifest["questions"]]
     ensure(bundled_ids == question_ids, "question bundle ids should preserve request order")
     for item in manifest["questions"]:
+        expected_prefix = f"{item['metadata']['description']}_"
+        ensure(item["directory"].startswith(expected_prefix), "question bundle directory should start with description")
+        ensure(
+            item["directory"] != item["question_id"],
+            "question bundle directory should not use raw question id",
+        )
         file_paths = {entry["zip_path"] for entry in item["files"]}
+        ensure(
+            all(path.startswith(f"{item['directory']}/") for path in file_paths),
+            "question bundle files should live under the description directory",
+        )
         ensure(any(path.endswith(".tex") for path in file_paths), "question bundle should include tex")
         ensure(any("/assets/" in path for path in file_paths), "question bundle should include assets")
         ensure(all(path in names for path in file_paths), "question bundle manifest paths must exist in zip")
@@ -499,9 +526,17 @@ def validate_paper_bundle(manifest: dict, names: list[str], paper_ids: list[str]
     bundled_ids = [item["paper_id"] for item in manifest["papers"]]
     ensure(bundled_ids == paper_ids, "paper bundle ids should preserve request order")
     for item in manifest["papers"]:
+        paper_prefix = f"{item['metadata']['description']}_"
+        ensure(item["directory"].startswith(paper_prefix), "paper bundle directory should start with description")
+        ensure(item["directory"] != item["paper_id"], "paper bundle directory should not use raw paper id")
         ensure(item["questions"], "paper bundle should include at least one question")
         for question in item["questions"]:
-            expected_prefix = f"{item['paper_id']}/{question['question_id']}/"
+            question_dir = question["directory"]
+            ensure(
+                question_dir.startswith(f"{item['directory']}/"),
+                "paper question directory should live under the paper directory",
+            )
+            expected_prefix = f"{question_dir}/"
             ensure(
                 any(name.startswith(expected_prefix) for name in names),
                 "paper bundle should include question folder contents",
@@ -624,11 +659,30 @@ def main() -> None:
         print_step("[5/8] Create and query multiple questions")
         question_ids: list[str] = []
         question_by_slug: dict[str, str] = {}
+        multipart_request(
+            "POST /questions missing description",
+            400,
+            path="/questions",
+            text_fields=None,
+            field_name="file",
+            file_path=zip_paths[0],
+            content_type="application/zip",
+        )
+        multipart_request(
+            "POST /questions invalid description",
+            400,
+            path="/questions",
+            text_fields={"description": "bad/name"},
+            field_name="file",
+            file_path=zip_paths[0],
+            content_type="application/zip",
+        )
         for spec, zip_path in zip(QUESTION_SPECS, zip_paths):
             _, body, _ = multipart_request(
                 f"POST /questions ({spec['slug']})",
                 200,
                 path="/questions",
+                text_fields={"description": spec["create_description"]},
                 field_name="file",
                 file_path=zip_path,
                 content_type="application/zip",
@@ -657,6 +711,13 @@ def main() -> None:
         ensure(len(parse_json(body)) == 3, "question list should contain three questions")
 
         _, body, _ = perform_request(
+            "GET /questions?q=热学",
+            200,
+            path="/questions?q=%E7%83%AD%E5%AD%A6",
+        )
+        ensure(question_by_slug["thermal"] in body, "Chinese description search should return thermal question")
+
+        _, body, _ = perform_request(
             "GET /questions?category=T",
             200,
             path="/questions?category=T",
@@ -671,9 +732,9 @@ def main() -> None:
         ensure(question_by_slug["optics"] in body, "tag filter should return optics question")
 
         _, body, _ = perform_request(
-            "GET /questions?q=thermal",
+            "GET /questions?q=热学",
             200,
-            path="/questions?q=thermal",
+            path="/questions?q=%E7%83%AD%E5%AD%A6",
         )
         ensure(question_by_slug["thermal"] in body, "search should return thermal question")
 
@@ -689,6 +750,21 @@ def main() -> None:
         )
 
         print_step("[6/8] Create papers and validate bundle downloads")
+        json_request(
+            "POST /papers invalid description",
+            400,
+            method="POST",
+            path="/papers",
+            payload={
+                "edition": "2026",
+                "paper_type": "regular",
+                "description": "bad/name",
+                "question_ids": [
+                    question_by_slug["mechanics"],
+                    question_by_slug["optics"],
+                ],
+            },
+        )
         _, body, _ = json_request(
             "POST /papers (mock-a)",
             200,
@@ -697,8 +773,7 @@ def main() -> None:
             payload={
                 "edition": "2026",
                 "paper_type": "regular",
-                "title": "Mock A",
-                "notes": "first multi-question paper",
+                "description": "综合训练试卷 A",
                 "question_ids": [
                     question_by_slug["mechanics"],
                     question_by_slug["optics"],
@@ -715,8 +790,7 @@ def main() -> None:
             payload={
                 "edition": "2026",
                 "paper_type": "final",
-                "title": "Mock B",
-                "notes": "second multi-question paper",
+                "description": "热学决赛卷",
                 "question_ids": [
                     question_by_slug["optics"],
                     question_by_slug["thermal"],
@@ -730,6 +804,20 @@ def main() -> None:
         _, body, _ = perform_request("GET /papers", 200, path="/papers")
         ensure(len(parse_json(body)) == 2, "paper list should contain two papers")
 
+        _, body, _ = perform_request(
+            "GET /papers?q=热学",
+            200,
+            path="/papers?q=%E7%83%AD%E5%AD%A6",
+        )
+        ensure(paper_b_id in body, "paper description search should return paper B")
+
+        _, body, _ = perform_request(
+            "GET /papers?paper_type=final&category=E&tag=optics&q=热学",
+            200,
+            path="/papers?paper_type=final&category=E&tag=optics&q=%E7%83%AD%E5%AD%A6",
+        )
+        ensure(paper_b_id in body, "combined paper filters should return paper B")
+
         perform_request(
             "GET /papers/{paper_a}",
             200,
@@ -742,8 +830,7 @@ def main() -> None:
             method="PATCH",
             path=f"/papers/{paper_a_id}",
             payload={
-                "title": "Mock A Revised",
-                "notes": "reordered for bundle validation",
+                "description": "综合训练重排卷",
                 "question_ids": [
                     question_by_slug["thermal"],
                     question_by_slug["mechanics"],
@@ -751,7 +838,15 @@ def main() -> None:
                 ],
             },
         )
-        ensure("Mock A Revised" in body, "paper patch should update title")
+        ensure("综合训练重排卷" in body, "paper patch should update description")
+
+        json_request(
+            f"PATCH /papers/{paper_a_id} invalid description",
+            400,
+            method="PATCH",
+            path=f"/papers/{paper_a_id}",
+            payload={"description": "bad/name"},
+        )
 
         _, body, _ = perform_request(
             "GET /questions?paper_id={paper_a}",

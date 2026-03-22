@@ -12,15 +12,32 @@
 {
   "edition": "2026",
   "paper_type": "regular",
-  "title": "Demo paper",
-  "notes": "optional",
+  "description": "Demo paper",
   "question_ids": ["uuid-1", "uuid-2"]
 }
 ```
 
+说明：
+
+- `description` 为必填，必须是非空字符串
+- `description` 支持中文
+- `description` 不能包含 `/ \\ : * ? " < > |`
+- `description` 不能是 `.`、`..`，也不能以 `.` 结尾
+
 ### `GET /papers`
 
-列出试卷摘要，包括题目数量。
+按条件分页查询试卷，搜索也统一走这个接口。
+
+支持的 query 参数：
+
+- `question_id`
+- `paper_type`
+- `category`
+- `tag`
+- `q`
+  关键词搜索，只会匹配 `description`
+- `limit`
+- `offset`
 
 ### `GET /papers/{paper_id}`
 
@@ -34,9 +51,11 @@
 
 - `edition`
 - `paper_type`
-- `title`
-- `notes`
+- `description`
 - `question_ids`
+
+其中 `description` 如果出现在更新请求里，必须是非空字符串。
+并且同样要满足上面的文件名安全限制。
 
 成功时返回更新后的完整试卷详情。
 
@@ -69,5 +88,5 @@
 
 - 响应体是一个 `application/zip`
 - zip 根目录包含 `manifest.json`
-- 每个试卷使用自己的 `paper_id/` 目录分组
-- 每个试卷目录下再按 `question_id/` 展开题目的 `.tex` 和 `assets/` 文件
+- 每个试卷使用 `description_uuid前缀/` 目录分组，例如 `热学决赛卷_550e84/`
+- 每个试卷目录下再按 `description_uuid前缀/` 展开题目的 `.tex` 和 `assets/` 文件
