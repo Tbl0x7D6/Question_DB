@@ -43,13 +43,14 @@ QUESTION_SPECS = [
         "zip_name": "question_mechanics.zip",
         "tex_name": "mechanics.tex",
         "tex_body": "\\section{Mechanics calibration}\nA cart slides on an incline.\n",
+        "create_description": "mechanics benchmark alpha",
         "assets": {
             "assets/diagram.txt": "incline-figure",
             "assets/data.csv": "time,velocity\n0,0\n1,3\n",
         },
         "patch": {
             "category": "T",
-            "notes": "mechanics benchmark alpha",
+            "description": "mechanics benchmark alpha",
             "tags": ["mechanics", "kinematics"],
             "status": "reviewed",
             "difficulty": {
@@ -64,13 +65,14 @@ QUESTION_SPECS = [
         "zip_name": "question_optics.zip",
         "tex_name": "optics.tex",
         "tex_body": "\\section{Optics setup}\nA lens forms an image on a screen.\n",
+        "create_description": "optics bundle beta",
         "assets": {
             "assets/lens.txt": "thin-lens",
             "assets/ray-path.txt": "ray-diagram",
         },
         "patch": {
             "category": "E",
-            "notes": "optics bundle beta",
+            "description": "optics bundle beta",
             "tags": ["optics", "lenses"],
             "status": "used",
             "difficulty": {
@@ -85,13 +87,14 @@ QUESTION_SPECS = [
         "zip_name": "question_thermal.zip",
         "tex_name": "thermal.tex",
         "tex_body": "\\section{Thermal equilibration}\nTwo bodies exchange heat.\n",
+        "create_description": "热学标定 gamma",
         "assets": {
             "assets/table.txt": "material,c\nCu,385\nAl,900\n",
             "assets/reference.txt": "thermal-reference",
         },
         "patch": {
             "category": "none",
-            "notes": "thermal calibration gamma",
+            "description": "热学标定 gamma",
             "tags": ["thermal", "calorimetry"],
             "status": "none",
             "difficulty": {
@@ -295,17 +298,31 @@ def multipart_request(
     expected_status: int,
     *,
     path: str,
+    text_fields: dict[str, str] | None,
     field_name: str,
     file_path: Path,
     content_type: str,
 ) -> tuple[int, str, dict[str, str]]:
     boundary = f"----QBApiBoundary{uuid.uuid4().hex}"
     file_bytes = file_path.read_bytes()
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="{field_name}"; filename="{file_path.name}"\r\n'
-        f"Content-Type: {content_type}\r\n\r\n"
-    ).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    body = bytearray()
+    for name, value in (text_fields or {}).items():
+        body.extend(
+            (
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{value}\r\n"
+            ).encode("utf-8")
+        )
+    body.extend(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{field_name}"; filename="{file_path.name}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8")
+    )
+    body.extend(file_bytes)
+    body.extend(f"\r\n--{boundary}--\r\n".encode("utf-8"))
 
     return perform_request(
         label,
@@ -313,8 +330,8 @@ def multipart_request(
         method="POST",
         path=path,
         headers={"content-type": f"multipart/form-data; boundary={boundary}"},
-        body=body,
-        request_body={"file": str(file_path)},
+        body=bytes(body),
+        request_body={"file": str(file_path), **(text_fields or {})},
     )
 
 
@@ -624,11 +641,21 @@ def main() -> None:
         print_step("[5/8] Create and query multiple questions")
         question_ids: list[str] = []
         question_by_slug: dict[str, str] = {}
+        multipart_request(
+            "POST /questions missing description",
+            400,
+            path="/questions",
+            text_fields=None,
+            field_name="file",
+            file_path=zip_paths[0],
+            content_type="application/zip",
+        )
         for spec, zip_path in zip(QUESTION_SPECS, zip_paths):
             _, body, _ = multipart_request(
                 f"POST /questions ({spec['slug']})",
                 200,
                 path="/questions",
+                text_fields={"description": spec["create_description"]},
                 field_name="file",
                 file_path=zip_path,
                 content_type="application/zip",
@@ -657,6 +684,13 @@ def main() -> None:
         ensure(len(parse_json(body)) == 3, "question list should contain three questions")
 
         _, body, _ = perform_request(
+            "GET /questions?q=热学",
+            200,
+            path="/questions?q=%E7%83%AD%E5%AD%A6",
+        )
+        ensure(question_by_slug["thermal"] in body, "Chinese description search should return thermal question")
+
+        _, body, _ = perform_request(
             "GET /questions?category=T",
             200,
             path="/questions?category=T",
@@ -671,9 +705,9 @@ def main() -> None:
         ensure(question_by_slug["optics"] in body, "tag filter should return optics question")
 
         _, body, _ = perform_request(
-            "GET /questions?q=thermal",
+            "GET /questions?q=热学",
             200,
-            path="/questions?q=thermal",
+            path="/questions?q=%E7%83%AD%E5%AD%A6",
         )
         ensure(question_by_slug["thermal"] in body, "search should return thermal question")
 
@@ -698,7 +732,7 @@ def main() -> None:
                 "edition": "2026",
                 "paper_type": "regular",
                 "title": "Mock A",
-                "notes": "first multi-question paper",
+                "description": "first multi-question paper",
                 "question_ids": [
                     question_by_slug["mechanics"],
                     question_by_slug["optics"],
@@ -716,7 +750,7 @@ def main() -> None:
                 "edition": "2026",
                 "paper_type": "final",
                 "title": "Mock B",
-                "notes": "second multi-question paper",
+                "description": "second multi-question paper",
                 "question_ids": [
                     question_by_slug["optics"],
                     question_by_slug["thermal"],
@@ -743,7 +777,7 @@ def main() -> None:
             path=f"/papers/{paper_a_id}",
             payload={
                 "title": "Mock A Revised",
-                "notes": "reordered for bundle validation",
+                "description": "reordered for bundle validation",
                 "question_ids": [
                     question_by_slug["thermal"],
                     question_by_slug["mechanics"],

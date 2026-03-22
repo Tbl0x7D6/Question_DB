@@ -26,13 +26,13 @@ pub(crate) async fn list_papers(
 ) -> Result<Json<Vec<super::models::PaperSummary>>, StatusCode> {
     let rows = query(
         r#"
-        SELECT p.paper_id::text AS paper_id, p.edition, p.paper_type, p.title, p.notes,
+        SELECT p.paper_id::text AS paper_id, p.edition, p.paper_type, p.title, p.description,
                COUNT(pq.question_id) AS question_count,
                to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM papers p
         LEFT JOIN paper_questions pq ON pq.paper_id = p.paper_id
-        GROUP BY p.paper_id, p.edition, p.paper_type, p.title, p.notes, p.created_at, p.updated_at
+        GROUP BY p.paper_id, p.edition, p.paper_type, p.title, p.description, p.created_at, p.updated_at
         ORDER BY p.created_at DESC, p.paper_id
         "#,
     )
@@ -73,7 +73,7 @@ pub(crate) async fn create_paper(
     query(
         r#"
         INSERT INTO papers (
-            paper_id, edition, paper_type, title, notes, created_at, updated_at
+            paper_id, edition, paper_type, title, description, created_at, updated_at
         )
         VALUES ($1::uuid, $2, $3, $4, $5, NOW(), NOW())
         "#,
@@ -82,7 +82,7 @@ pub(crate) async fn create_paper(
     .bind(request.edition.as_deref())
     .bind(&paper_type)
     .bind(&request.title)
-    .bind(request.notes.as_deref())
+    .bind(request.description.as_deref())
     .execute(&mut *tx)
     .await
     .context("insert paper failed")?;
@@ -177,13 +177,13 @@ pub(crate) async fn update_paper(
             .context("update paper title failed")?;
     }
 
-    if let Some(notes) = &update.notes {
-        query("UPDATE papers SET notes = $2, updated_at = NOW() WHERE paper_id = $1::uuid")
+    if let Some(description) = &update.description {
+        query("UPDATE papers SET description = $2, updated_at = NOW() WHERE paper_id = $1::uuid")
             .bind(&paper_id)
-            .bind(notes.as_deref())
+            .bind(description.as_deref())
             .execute(&mut *tx)
             .await
-            .context("update paper notes failed")?;
+            .context("update paper description failed")?;
     }
 
     if let Some(question_ids) = &update.question_ids {
@@ -263,7 +263,7 @@ pub(crate) async fn get_paper_detail(
 async fn fetch_paper_detail(state: &AppState, paper_id: &str) -> Result<PaperDetail, ApiError> {
     let paper_row = query(
         r#"
-        SELECT paper_id::text AS paper_id, edition, paper_type, title, notes,
+        SELECT paper_id::text AS paper_id, edition, paper_type, title, description,
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM papers

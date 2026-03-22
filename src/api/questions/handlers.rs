@@ -65,6 +65,7 @@ pub(crate) async fn create_question(
     mut multipart: Multipart,
 ) -> ApiResult<QuestionImportResponse> {
     let mut file_name = None;
+    let mut description = None;
     let mut bytes = Vec::new();
 
     while let Some(field) = multipart
@@ -75,17 +76,28 @@ pub(crate) async fn create_question(
         let Some(name) = field.name() else {
             continue;
         };
-        if name != "file" {
-            continue;
+        match name {
+            "file" => {
+                file_name = field.file_name().map(str::to_string);
+                bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|err| {
+                        ApiError::bad_request(format!("read uploaded file failed: {err}"))
+                    })?
+                    .to_vec();
+            }
+            "description" => {
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|err| {
+                        ApiError::bad_request(format!("read description field failed: {err}"))
+                    })?;
+                description = Some(value);
+            }
+            _ => {}
         }
-
-        file_name = field.file_name().map(str::to_string);
-        bytes = field
-            .bytes()
-            .await
-            .map_err(|err| ApiError::bad_request(format!("read uploaded file failed: {err}")))?
-            .to_vec();
-        break;
     }
 
     if bytes.is_empty() {
@@ -93,12 +105,20 @@ pub(crate) async fn create_question(
             "multipart form must include a non-empty 'file' field",
         ));
     }
+    let description = description
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "multipart form must include a non-empty 'description' field",
+            )
+        })?;
     if bytes.len() > MAX_UPLOAD_BYTES {
         return Err(ApiError::bad_request("uploaded zip exceeds 20 MiB limit"));
     }
 
     Ok(Json(
-        import_question_zip(&state.pool, file_name.as_deref(), bytes)
+        import_question_zip(&state.pool, file_name.as_deref(), &description, bytes)
             .await
             .map_err(ApiError::from)?,
     ))
@@ -145,13 +165,15 @@ pub(crate) async fn update_question_metadata(
         .context("update question category failed")?;
     }
 
-    if let Some(notes) = &update.notes {
-        query("UPDATE questions SET notes = $2, updated_at = NOW() WHERE question_id = $1::uuid")
+    if let Some(description) = &update.description {
+        query(
+            "UPDATE questions SET description = $2, updated_at = NOW() WHERE question_id = $1::uuid",
+        )
             .bind(&question_id)
-            .bind(notes)
+            .bind(description)
             .execute(&mut *tx)
             .await
-            .context("update question notes failed")?;
+            .context("update question description failed")?;
     }
 
     if let Some(status) = &update.status {
@@ -300,7 +322,7 @@ async fn fetch_question_detail(
     let row = query(
         r#"
         SELECT question_id::text AS question_id, source_tex_path, category, status,
-               COALESCE(notes, '') AS notes, difficulty_human, difficulty_notes,
+               COALESCE(description, '') AS description, difficulty_human, difficulty_notes,
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM questions

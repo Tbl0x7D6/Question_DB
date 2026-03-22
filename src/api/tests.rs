@@ -20,6 +20,8 @@ mod tests {
         assert_eq!(query.bind_count, count_question_binds(&params));
         assert!(query.sql.contains("FROM question_tags qt"));
         assert!(query.sql.contains("FROM paper_questions pq"));
-        assert!(query.sql.contains("COALESCE(q.notes, '') ILIKE"));
+        assert!(query.sql.contains("COALESCE(q.description, '') ILIKE"));
+        assert!(!query.sql.contains("q.question_id::text ILIKE"));
+        assert!(!query.sql.contains("q.source_tex_path, '') ILIKE"));
     }
 }

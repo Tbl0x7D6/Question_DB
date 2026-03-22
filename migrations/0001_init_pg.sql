@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS questions (
     source_tex_path TEXT NOT NULL,
     category TEXT NOT NULL DEFAULT 'none' CHECK (category IN ('none', 'T', 'E')),
     status TEXT NOT NULL DEFAULT 'none' CHECK (status IN ('none', 'reviewed', 'used')),
-    notes TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL CHECK (btrim(description) <> ''),
     difficulty_human INT CHECK (difficulty_human BETWEEN 1 AND 10),
     difficulty_notes TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS papers (
     edition TEXT,
     paper_type TEXT NOT NULL,
     title TEXT NOT NULL,
-    notes TEXT,
+    description TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

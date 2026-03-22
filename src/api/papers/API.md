@@ -13,7 +13,7 @@
   "edition": "2026",
   "paper_type": "regular",
   "title": "Demo paper",
-  "notes": "optional",
+  "description": "optional",
   "question_ids": ["uuid-1", "uuid-2"]
 }
 ```
@@ -35,7 +35,7 @@
 - `edition`
 - `paper_type`
 - `title`
-- `notes`
+- `description`
 - `question_ids`
 
 成功时返回更新后的完整试卷详情。

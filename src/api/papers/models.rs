@@ -11,7 +11,7 @@ pub struct PaperSummary {
     pub(crate) edition: Option<String>,
     pub(crate) paper_type: String,
     pub(crate) title: String,
-    pub(crate) notes: Option<String>,
+    pub(crate) description: Option<String>,
     pub(crate) question_count: i64,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
@@ -32,7 +32,7 @@ pub struct PaperDetail {
     pub(crate) edition: Option<String>,
     pub(crate) paper_type: String,
     pub(crate) title: String,
-    pub(crate) notes: Option<String>,
+    pub(crate) description: Option<String>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
     pub(crate) questions: Vec<PaperQuestionSummary>,
@@ -43,7 +43,7 @@ pub(crate) struct CreatePaperRequest {
     pub(crate) edition: Option<String>,
     pub(crate) paper_type: String,
     pub(crate) title: String,
-    pub(crate) notes: Option<String>,
+    pub(crate) description: Option<String>,
     pub(crate) question_ids: Vec<String>,
 }
 
@@ -64,7 +64,7 @@ pub(crate) struct UpdatePaperRequest {
     #[serde(default)]
     pub(crate) title: Option<String>,
     #[serde(default)]
-    pub(crate) notes: Option<Option<String>>,
+    pub(crate) description: Option<Option<String>>,
     #[serde(default)]
     pub(crate) question_ids: Option<Vec<String>>,
 }
@@ -74,7 +74,7 @@ pub(crate) struct NormalizedPaperUpdate {
     pub(crate) edition: Option<Option<String>>,
     pub(crate) paper_type: Option<String>,
     pub(crate) title: Option<String>,
-    pub(crate) notes: Option<Option<String>>,
+    pub(crate) description: Option<Option<String>>,
     pub(crate) question_ids: Option<Vec<String>>,
 }
 
@@ -96,11 +96,11 @@ impl UpdatePaperRequest {
         if self.edition.is_none()
             && self.paper_type.is_none()
             && self.title.is_none()
-            && self.notes.is_none()
+            && self.description.is_none()
             && self.question_ids.is_none()
         {
             return Err(anyhow!(
-                "request body must include at least one of: edition, paper_type, title, notes, question_ids"
+                "request body must include at least one of: edition, paper_type, title, description, question_ids"
             ));
         }
 
@@ -115,8 +115,8 @@ impl UpdatePaperRequest {
             .title
             .map(|value| normalize_required_text("title", &value))
             .transpose()?;
-        let notes = self
-            .notes
+        let description = self
+            .description
             .map(|value| value.and_then(normalize_optional_text));
         let question_ids = self.question_ids.map(normalize_question_ids).transpose()?;
 
@@ -124,7 +124,7 @@ impl UpdatePaperRequest {
             edition,
             paper_type,
             title,
-            notes,
+            description,
             question_ids,
         })
     }

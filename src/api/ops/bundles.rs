@@ -261,7 +261,7 @@ async fn load_question_bundle_data(pool: &PgPool, question_id: &str) -> Result<Q
     let row = query(
         r#"
         SELECT question_id::text AS question_id, source_tex_path, category, status,
-               COALESCE(notes, '') AS notes, difficulty_human, difficulty_notes,
+               COALESCE(description, '') AS description, difficulty_human, difficulty_notes,
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM questions
@@ -326,7 +326,7 @@ async fn load_question_bundle_data(pool: &PgPool, question_id: &str) -> Result<Q
 async fn load_paper_bundle_data(pool: &PgPool, paper_id: &str) -> Result<PaperBundleData> {
     let paper_row = query(
         r#"
-        SELECT paper_id::text AS paper_id, edition, paper_type, title, notes,
+        SELECT paper_id::text AS paper_id, edition, paper_type, title, description,
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM papers

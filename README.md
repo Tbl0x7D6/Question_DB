@@ -76,9 +76,10 @@ question.zip
 - zip 根目录必须恰好有一个 `assets/` 目录
 - 除根目录 tex 和 `assets/` 下资源外，不允许额外文件或目录
 - tex 和 `assets/` 下的资源文件都会写入 `objects` 表
-- 题目 metadata 在上传时使用默认值：
+- 上传题目时必须额外提供一个非空的 `description`
+- `description` 支持中文，并可直接参与 `GET /questions?q=...` 的模糊匹配
+- 题目 metadata 在上传时其余字段使用默认值：
   - `category = "none"`
-  - `notes = ""`
   - `tags = []`
   - `status = "none"`
   - `difficulty = {}`
@@ -94,6 +95,7 @@ question.zip
 
 ```bash
 curl -X POST http://127.0.0.1:8080/questions \
+  -F "description=热学标定题" \
   -F "file=@question.zip"
 ```
 
@@ -106,7 +108,7 @@ curl -X POST http://127.0.0.1:8080/questions \
 ```json
 {
   "category": "T",
-  "notes": "demo question",
+  "description": "demo question",
   "tags": ["optics", "mechanics"],
   "status": "reviewed",
   "difficulty": {
@@ -122,7 +124,7 @@ curl -X POST http://127.0.0.1:8080/questions \
 说明：
 
 - 请求体支持部分更新
-- `notes` 传 `null` 或空串会被清空为 `""`
+- `description` 如果出现在更新请求里，必须是非空字符串
 - `tags` 传空数组会清空
 - `difficulty` 传 `{}` 会清空整个难度信息
 - `difficulty.human` 和 `difficulty.algorithm.*` 都要求在 `1..=10`
@@ -161,7 +163,7 @@ curl -X POST http://127.0.0.1:8080/questions \
   "edition": "2026",
   "paper_type": "regular",
   "title": "CPHOS Mock Paper",
-  "notes": "demo",
+  "description": "demo",
   "question_ids": [
     "8db0d12e-2968-4ede-86d5-1dc5ff0a5d10",
     "e21ed70d-cd18-45cc-89ab-2785d07f4de7"
