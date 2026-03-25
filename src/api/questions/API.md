@@ -78,7 +78,6 @@
 支持的 query 参数：
 
 - `paper_id`
-- `paper_type`
 - `category`
 - `tag`
 - `difficulty_tag`

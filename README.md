@@ -162,18 +162,19 @@ curl -X POST http://127.0.0.1:8080/questions \
 
 `POST /papers`
 
-请求体示例：
+使用 `multipart/form-data` 上传初始化 metadata 和附加 zip。
 
-```json
-{
-  "edition": "2026",
-  "paper_type": "regular",
-  "description": "demo paper",
-  "question_ids": [
-    "8db0d12e-2968-4ede-86d5-1dc5ff0a5d10",
-    "e21ed70d-cd18-45cc-89ab-2785d07f4de7"
-  ]
-}
+示例：
+
+```bash
+curl -X POST http://127.0.0.1:8080/papers \
+  -F 'description=demo paper' \
+  -F 'title=Demo Paper' \
+  -F 'subtitle=Initial Draft' \
+  -F 'authors=["Alice","Bob"]' \
+  -F 'reviewers=["Carol"]' \
+  -F 'question_ids=["8db0d12e-2968-4ede-86d5-1dc5ff0a5d10","e21ed70d-cd18-45cc-89ab-2785d07f4de7"]' \
+  -F 'file=@paper_appendix.zip;type=application/zip'
 ```
 
 题目顺序由 `question_ids` 数组顺序决定。
@@ -182,12 +183,17 @@ curl -X POST http://127.0.0.1:8080/questions \
 
 - `description` 为必填，必须是非空字符串
 - `description` 同样会参与 bundle 目录命名，因此也要满足上面的文件名安全限制
-- `GET /papers` 支持通过 `question_id`、`paper_type`、`category`、`tag`、`q`、`limit`、`offset` 做组合查询
-- `q` 只会模糊匹配试卷的 `description`
+- `title`、`subtitle` 为必填非空字符串
+- `authors`、`reviewers` 为 JSON 字符串数组
+- `POST /papers` 必须带一个合法 zip，服务端会原样存成附加 binary
+- `GET /papers` 支持通过 `question_id`、`category`、`tag`、`q`、`limit`、`offset` 做组合查询
+- `q` 会模糊匹配试卷的 `description`、`title`、`subtitle`、`authors`、`reviewers`
 
 ### 更新试卷
 
 `PATCH /papers/{paper_id}`
+
+更新 metadata，也支持通过 `question_ids` 重排题目列表。支持字段：`description`、`title`、`subtitle`、`authors`、`reviewers`、`question_ids`。
 
 ### 删除试卷
 
@@ -208,7 +214,7 @@ curl -X POST http://127.0.0.1:8080/questions \
 }
 ```
 
-返回一个 zip，根目录附带 `manifest.json`，并按 `paperDescription_uuid前缀/questionDescription_uuid前缀/` 目录展开题目文件。
+返回一个 zip，根目录附带 `manifest.json`，并按 `paperDescription_uuid前缀/questionDescription_uuid前缀/` 目录展开题目文件。每个试卷目录还会附带一个重命名后的 `append.zip`，内容就是创建试卷时上传的那个 zip。
 
 ### 查询与运维
 

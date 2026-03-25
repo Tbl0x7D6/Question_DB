@@ -2,18 +2,21 @@ use std::collections::HashSet;
 
 use anyhow::Context;
 use axum::{
-    extract::{Path as AxumPath, Query, State},
+    extract::{Multipart, Path as AxumPath, Query, State},
     http::StatusCode,
     Json,
 };
 use sqlx::{query, Row};
 use uuid::Uuid;
 
-use super::models::{
-    CreatePaperRequest, PaperDeleteResponse, PaperDetail, PaperWriteResponse, PapersParams,
-    UpdatePaperRequest,
+use super::{
+    imports::{import_paper_zip, MAX_UPLOAD_BYTES},
+    models::{
+        CreatePaperRequest, PaperDeleteResponse, PaperDetail, PaperImportResponse, PapersParams,
+        UpdatePaperRequest,
+    },
+    queries::{execute_papers_query, validate_and_build_papers_query},
 };
-use super::queries::{execute_papers_query, validate_and_build_papers_query};
 use crate::api::{
     questions::queries::{
         load_question_tags, map_paper_detail, map_paper_question_summary, map_paper_summary,
@@ -36,66 +39,98 @@ pub(crate) async fn list_papers(
 
 pub(crate) async fn create_paper(
     State(state): State<AppState>,
-    Json(request): Json<CreatePaperRequest>,
-) -> ApiResult<PaperWriteResponse> {
-    let request = request
-        .normalize()
-        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    mut multipart: Multipart,
+) -> ApiResult<PaperImportResponse> {
+    let mut file_name = None;
+    let mut description = None;
+    let mut title = None;
+    let mut subtitle = None;
+    let mut authors = None;
+    let mut reviewers = None;
+    let mut question_ids = None;
+    let mut bytes = Vec::new();
 
-    let mut seen_question_ids = HashSet::new();
-    for question_id in &request.question_ids {
-        if !seen_question_ids.insert(question_id.clone()) {
-            return Err(ApiError::bad_request(format!(
-                "duplicate question_id in question_ids: {question_id}"
-            )));
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|err| ApiError::bad_request(format!("read multipart field failed: {err}")))?
+    {
+        let Some(name) = field.name() else {
+            continue;
+        };
+        match name {
+            "file" => {
+                file_name = field.file_name().map(str::to_string);
+                bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|err| {
+                        ApiError::bad_request(format!("read uploaded file failed: {err}"))
+                    })?
+                    .to_vec();
+            }
+            "description" => {
+                description = Some(read_text_field(field, "description").await?);
+            }
+            "title" => {
+                title = Some(read_text_field(field, "title").await?);
+            }
+            "subtitle" => {
+                subtitle = Some(read_text_field(field, "subtitle").await?);
+            }
+            "authors" => {
+                authors = Some(read_json_string_list_field(field, "authors").await?);
+            }
+            "reviewers" => {
+                reviewers = Some(read_json_string_list_field(field, "reviewers").await?);
+            }
+            "question_ids" => {
+                question_ids = Some(read_json_string_list_field(field, "question_ids").await?);
+            }
+            _ => {}
         }
-        Uuid::parse_str(question_id)
-            .map_err(|_| ApiError::bad_request(format!("invalid question_id: {question_id}")))?;
     }
 
+    if bytes.is_empty() {
+        return Err(ApiError::bad_request(
+            "multipart form must include a non-empty 'file' field",
+        ));
+    }
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return Err(ApiError::bad_request("uploaded zip exceeds 20 MiB limit"));
+    }
+
+    let request = CreatePaperRequest {
+        description: description.ok_or_else(|| {
+            ApiError::bad_request("multipart form must include a non-empty 'description' field")
+        })?,
+        title: title.ok_or_else(|| {
+            ApiError::bad_request("multipart form must include a non-empty 'title' field")
+        })?,
+        subtitle: subtitle.ok_or_else(|| {
+            ApiError::bad_request("multipart form must include a non-empty 'subtitle' field")
+        })?,
+        authors: authors.ok_or_else(|| {
+            ApiError::bad_request("multipart form must include an 'authors' field")
+        })?,
+        reviewers: reviewers.ok_or_else(|| {
+            ApiError::bad_request("multipart form must include a 'reviewers' field")
+        })?,
+        question_ids: question_ids.ok_or_else(|| {
+            ApiError::bad_request("multipart form must include a non-empty 'question_ids' field")
+        })?,
+    }
+    .normalize()
+    .map_err(|err| ApiError::bad_request(err.to_string()))?;
+
+    validate_question_ids(&request.question_ids)?;
     ensure_questions_exist(&state.pool, &request.question_ids).await?;
 
-    let paper_id = Uuid::new_v4().to_string();
-    let mut tx = state.pool.begin().await.context("begin paper tx failed")?;
-
-    query(
-        r#"
-        INSERT INTO papers (
-            paper_id, edition, paper_type, description, created_at, updated_at
-        )
-        VALUES ($1::uuid, $2, $3, $4, NOW(), NOW())
-        "#,
-    )
-    .bind(&paper_id)
-    .bind(request.edition.as_deref())
-    .bind(&request.paper_type)
-    .bind(&request.description)
-    .execute(&mut *tx)
-    .await
-    .context("insert paper failed")?;
-
-    for (idx, question_id) in request.question_ids.iter().enumerate() {
-        query(
-            r#"
-            INSERT INTO paper_questions (paper_id, question_id, sort_order, created_at)
-            VALUES ($1::uuid, $2::uuid, $3, NOW())
-            "#,
-        )
-        .bind(&paper_id)
-        .bind(question_id)
-        .bind(i32::try_from(idx + 1).unwrap_or(i32::MAX))
-        .execute(&mut *tx)
-        .await
-        .with_context(|| format!("insert paper question ref failed: {question_id}"))?;
-    }
-
-    tx.commit().await.context("commit paper failed")?;
-
-    Ok(Json(PaperWriteResponse {
-        paper_id,
-        status: "saved",
-        question_count: request.question_ids.len(),
-    }))
+    Ok(Json(
+        import_paper_zip(&state.pool, file_name.as_deref(), &request, bytes)
+            .await
+            .map_err(map_paper_create_error)?,
+    ))
 }
 
 pub(crate) async fn update_paper(
@@ -111,11 +146,7 @@ pub(crate) async fn update_paper(
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
 
     if let Some(question_ids) = &update.question_ids {
-        for question_id in question_ids {
-            Uuid::parse_str(question_id).map_err(|_| {
-                ApiError::bad_request(format!("invalid question_id: {question_id}"))
-            })?;
-        }
+        validate_question_ids(question_ids)?;
         ensure_questions_exist(&state.pool, question_ids).await?;
     }
 
@@ -137,24 +168,6 @@ pub(crate) async fn update_paper(
         });
     }
 
-    if let Some(edition) = &update.edition {
-        query("UPDATE papers SET edition = $2, updated_at = NOW() WHERE paper_id = $1::uuid")
-            .bind(&paper_id)
-            .bind(edition.as_deref())
-            .execute(&mut *tx)
-            .await
-            .context("update paper edition failed")?;
-    }
-
-    if let Some(paper_type) = &update.paper_type {
-        query("UPDATE papers SET paper_type = $2, updated_at = NOW() WHERE paper_id = $1::uuid")
-            .bind(&paper_id)
-            .bind(paper_type)
-            .execute(&mut *tx)
-            .await
-            .context("update paper type failed")?;
-    }
-
     if let Some(description) = &update.description {
         query("UPDATE papers SET description = $2, updated_at = NOW() WHERE paper_id = $1::uuid")
             .bind(&paper_id)
@@ -162,6 +175,42 @@ pub(crate) async fn update_paper(
             .execute(&mut *tx)
             .await
             .context("update paper description failed")?;
+    }
+
+    if let Some(title) = &update.title {
+        query("UPDATE papers SET title = $2, updated_at = NOW() WHERE paper_id = $1::uuid")
+            .bind(&paper_id)
+            .bind(title)
+            .execute(&mut *tx)
+            .await
+            .context("update paper title failed")?;
+    }
+
+    if let Some(subtitle) = &update.subtitle {
+        query("UPDATE papers SET subtitle = $2, updated_at = NOW() WHERE paper_id = $1::uuid")
+            .bind(&paper_id)
+            .bind(subtitle)
+            .execute(&mut *tx)
+            .await
+            .context("update paper subtitle failed")?;
+    }
+
+    if let Some(authors) = &update.authors {
+        query("UPDATE papers SET authors = $2, updated_at = NOW() WHERE paper_id = $1::uuid")
+            .bind(&paper_id)
+            .bind(authors)
+            .execute(&mut *tx)
+            .await
+            .context("update paper authors failed")?;
+    }
+
+    if let Some(reviewers) = &update.reviewers {
+        query("UPDATE papers SET reviewers = $2, updated_at = NOW() WHERE paper_id = $1::uuid")
+            .bind(&paper_id)
+            .bind(reviewers)
+            .execute(&mut *tx)
+            .await
+            .context("update paper reviewers failed")?;
     }
 
     if let Some(question_ids) = &update.question_ids {
@@ -241,7 +290,7 @@ pub(crate) async fn get_paper_detail(
 async fn fetch_paper_detail(state: &AppState, paper_id: &str) -> Result<PaperDetail, ApiError> {
     let paper_row = query(
         r#"
-        SELECT paper_id::text AS paper_id, edition, paper_type, description,
+        SELECT paper_id::text AS paper_id, description, title, subtitle, authors, reviewers,
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM papers
@@ -286,6 +335,39 @@ async fn fetch_paper_detail(state: &AppState, paper_id: &str) -> Result<PaperDet
     Ok(map_paper_detail(paper_row, questions))
 }
 
+async fn read_text_field(
+    field: axum::extract::multipart::Field<'_>,
+    field_name: &str,
+) -> Result<String, ApiError> {
+    field
+        .text()
+        .await
+        .map_err(|err| ApiError::bad_request(format!("read {field_name} field failed: {err}")))
+}
+
+async fn read_json_string_list_field(
+    field: axum::extract::multipart::Field<'_>,
+    field_name: &str,
+) -> Result<Vec<String>, ApiError> {
+    let text = read_text_field(field, field_name).await?;
+    serde_json::from_str::<Vec<String>>(&text)
+        .map_err(|err| ApiError::bad_request(format!("invalid {field_name} field: {err}")))
+}
+
+fn validate_question_ids(question_ids: &[String]) -> Result<(), ApiError> {
+    let mut seen_question_ids = HashSet::new();
+    for question_id in question_ids {
+        if !seen_question_ids.insert(question_id.clone()) {
+            return Err(ApiError::bad_request(format!(
+                "duplicate question_id in question_ids: {question_id}"
+            )));
+        }
+        Uuid::parse_str(question_id)
+            .map_err(|_| ApiError::bad_request(format!("invalid question_id: {question_id}")))?;
+    }
+    Ok(())
+}
+
 async fn ensure_questions_exist(
     pool: &sqlx::PgPool,
     question_ids: &[String],
@@ -323,4 +405,16 @@ fn map_paper_detail_error(err: ApiError) -> ApiError {
 
 fn map_paper_detail_status(err: ApiError) -> StatusCode {
     err.status
+}
+
+fn map_paper_create_error(err: anyhow::Error) -> ApiError {
+    let message = err.to_string();
+    if message.contains("uploaded file is empty")
+        || message.contains("uploaded zip exceeds")
+        || message.contains("open zip archive failed")
+    {
+        ApiError::bad_request(message)
+    } else {
+        ApiError::from(err)
+    }
 }

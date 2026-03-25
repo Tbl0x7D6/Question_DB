@@ -58,6 +58,7 @@ struct PaperBundleManifestItem {
     paper_id: String,
     directory: String,
     metadata: PaperDetail,
+    append_file: BundleFileEntry,
     questions: Vec<PaperBundleQuestionManifestItem>,
 }
 
@@ -87,7 +88,15 @@ struct QuestionBundleData {
 #[derive(Debug)]
 struct PaperBundleData {
     metadata: PaperDetail,
+    appendix: PaperAppendixData,
     questions: Vec<QuestionBundleData>,
+}
+
+#[derive(Debug)]
+struct PaperAppendixData {
+    object_id: String,
+    original_file_name: String,
+    mime_type: Option<String>,
 }
 
 pub(crate) async fn build_question_bundle_response(
@@ -146,6 +155,8 @@ pub(crate) async fn build_paper_bundle_response(
     for paper_id in paper_ids {
         let bundle = load_paper_bundle_data(pool, paper_id).await?;
         let directory = bundle_directory_name(&bundle.metadata.description, paper_id);
+        let append_file =
+            write_paper_appendix_file(pool, &mut writer, &bundle.appendix, &directory).await?;
         let mut question_entries = Vec::with_capacity(bundle.questions.len());
 
         for question in bundle.questions {
@@ -175,6 +186,7 @@ pub(crate) async fn build_paper_bundle_response(
             paper_id: paper_id.clone(),
             directory,
             metadata: bundle.metadata,
+            append_file,
             questions: question_entries,
         });
     }
@@ -200,12 +212,7 @@ async fn write_question_bundle_files(
     for file in files {
         let zip_path = format!("{directory}/{}", file.path);
         let bytes = fetch_object_bytes(pool, &file.object_id).await?;
-        writer
-            .start_file(zip_path.clone(), SimpleFileOptions::default())
-            .context("start bundle file entry failed")?;
-        writer
-            .write_all(&bytes)
-            .with_context(|| format!("write bundle file failed: {zip_path}"))?;
+        write_bundle_file(writer, &zip_path, &bytes)?;
 
         manifest_entries.push(BundleFileEntry {
             zip_path,
@@ -217,6 +224,35 @@ async fn write_question_bundle_files(
     }
 
     Ok(manifest_entries)
+}
+
+async fn write_paper_appendix_file(
+    pool: &PgPool,
+    writer: &mut ZipWriter<File>,
+    appendix: &PaperAppendixData,
+    directory: &str,
+) -> Result<BundleFileEntry> {
+    let zip_path = format!("{directory}/append.zip");
+    let bytes = fetch_object_bytes(pool, &appendix.object_id).await?;
+    write_bundle_file(writer, &zip_path, &bytes)?;
+
+    Ok(BundleFileEntry {
+        zip_path,
+        original_path: appendix.original_file_name.clone(),
+        file_kind: "appendix".to_string(),
+        object_id: appendix.object_id.clone(),
+        mime_type: appendix.mime_type.clone(),
+    })
+}
+
+fn write_bundle_file(writer: &mut ZipWriter<File>, zip_path: &str, bytes: &[u8]) -> Result<()> {
+    writer
+        .start_file(zip_path, SimpleFileOptions::default())
+        .context("start bundle file entry failed")?;
+    writer
+        .write_all(bytes)
+        .with_context(|| format!("write bundle file failed: {zip_path}"))?;
+    Ok(())
 }
 
 fn write_manifest<T: Serialize>(writer: &mut ZipWriter<File>, manifest: &T) -> Result<()> {
@@ -300,7 +336,7 @@ async fn load_question_bundle_data(pool: &PgPool, question_id: &str) -> Result<Q
 
     let papers = query(
         r#"
-        SELECT p.paper_id::text AS paper_id, p.edition, p.paper_type, pq.sort_order
+        SELECT p.paper_id::text AS paper_id, p.description, p.title, p.subtitle, pq.sort_order
         FROM paper_questions pq
         JOIN papers p ON p.paper_id = pq.paper_id
         WHERE pq.question_id = $1::uuid
@@ -314,8 +350,9 @@ async fn load_question_bundle_data(pool: &PgPool, question_id: &str) -> Result<Q
     .into_iter()
     .map(|row| QuestionPaperRef {
         paper_id: row.get("paper_id"),
-        edition: row.get("edition"),
-        paper_type: row.get("paper_type"),
+        description: row.get("description"),
+        title: row.get("title"),
+        subtitle: row.get("subtitle"),
         sort_order: row.get("sort_order"),
     })
     .collect::<Vec<_>>();
@@ -332,11 +369,14 @@ async fn load_question_bundle_data(pool: &PgPool, question_id: &str) -> Result<Q
 async fn load_paper_bundle_data(pool: &PgPool, paper_id: &str) -> Result<PaperBundleData> {
     let paper_row = query(
         r#"
-        SELECT paper_id::text AS paper_id, edition, paper_type, description,
-               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
-               to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
-        FROM papers
-        WHERE paper_id = $1::uuid
+        SELECT p.paper_id::text AS paper_id, p.description, p.title, p.subtitle,
+               p.authors, p.reviewers, p.append_object_id::text AS append_object_id,
+               o.file_name AS append_file_name, o.mime_type AS append_mime_type,
+               to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+               to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
+        FROM papers p
+        JOIN objects o ON o.object_id = p.append_object_id
+        WHERE p.paper_id = $1::uuid
         "#,
     )
     .bind(paper_id)
@@ -370,8 +410,15 @@ async fn load_paper_bundle_data(pool: &PgPool, paper_id: &str) -> Result<PaperBu
         questions.push(load_question_bundle_data(pool, &question_id).await?);
     }
 
+    let appendix = PaperAppendixData {
+        object_id: paper_row.get("append_object_id"),
+        original_file_name: paper_row.get("append_file_name"),
+        mime_type: paper_row.get("append_mime_type"),
+    };
+
     Ok(PaperBundleData {
         metadata: map_paper_detail(paper_row, question_summaries),
+        appendix,
         questions,
     })
 }

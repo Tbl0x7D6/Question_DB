@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import atexit
+import io
 import json
 import os
 import shutil
@@ -24,6 +25,7 @@ API_LOG_PATH = TMP_DIR / "qb_api_e2e.log"
 EXPORT_PATH = TMP_DIR / "qb_e2e_internal.jsonl"
 QUALITY_PATH = TMP_DIR / "qb_e2e_quality.json"
 REPORT_PATH = TMP_DIR / "qb_e2e_report.md"
+INVALID_PAPER_UPLOAD_PATH = SAMPLES_DIR / "paper_invalid_upload.bin"
 
 CONTAINER_NAME = os.environ.get("CONTAINER_NAME", "qb-postgres-e2e")
 POSTGRES_IMAGE = os.environ.get("POSTGRES_IMAGE", "postgres:14.1")
@@ -120,6 +122,49 @@ QUESTION_SPECS = [
                 "heuristic": {"score": 4, "notes": "direct model"},
                 "simulator": {"score": 6},
             },
+        },
+    },
+]
+
+PAPER_SPECS = [
+    {
+        "slug": "mock-a",
+        "zip_name": "paper_appendix_a.zip",
+        "appendix_entries": {
+            "meta/info.json": '{"version":1,"paper":"A"}',
+            "drafts/notes.txt": "first draft appendix",
+        },
+        "create": {
+            "description": "综合训练试卷 A",
+            "title": "综合训练 2026 A 卷",
+            "subtitle": "校内选拔 初版",
+            "authors": ["Alice Zhang", "Bob Chen"],
+            "reviewers": ["Carol Xu"],
+            "question_slugs": ["mechanics", "optics"],
+        },
+        "patch": {
+            "description": "综合训练重排卷",
+            "title": "综合训练 2026 A 卷（修订）",
+            "subtitle": "校内选拔 终版",
+            "authors": ["Alice Zhang", "Dana Sun"],
+            "reviewers": ["Carol Xu", "Evan Li"],
+            "question_slugs": ["thermal", "mechanics", "optics"],
+        },
+    },
+    {
+        "slug": "mock-b",
+        "zip_name": "paper_appendix_b.zip",
+        "appendix_entries": {
+            "review/summary.md": "# Thermal finals\n",
+            "attachments/table.csv": "part,score\noptics,8\nthermal,10\n",
+        },
+        "create": {
+            "description": "热学决赛卷",
+            "title": "热学专题决赛",
+            "subtitle": "终稿",
+            "authors": ["Fiona Gu"],
+            "reviewers": ["Grace He", "Han Wu"],
+            "question_slugs": ["optics", "thermal"],
         },
     },
 ]
@@ -329,6 +374,11 @@ def inspect_zip_file(file_path: Path) -> dict:
     }
 
 
+def inspect_zip_bytes(data: bytes) -> list[str]:
+    with zipfile.ZipFile(io.BytesIO(data), "r") as archive:
+        return archive.namelist()
+
+
 def multipart_request(
     label: str,
     expected_status: int,
@@ -439,7 +489,7 @@ def binary_json_request(
     return zip_details["manifest"], zip_details["entries"]
 
 
-def build_sample_zips() -> list[Path]:
+def build_sample_question_zips() -> list[Path]:
     zip_paths: list[Path] = []
     for spec in QUESTION_SPECS:
         zip_path = SAMPLES_DIR / spec["zip_name"]
@@ -448,6 +498,18 @@ def build_sample_zips() -> list[Path]:
             for asset_path, content in spec["assets"].items():
                 archive.writestr(asset_path, content)
         zip_paths.append(zip_path)
+    return zip_paths
+
+
+def build_sample_paper_appendix_zips() -> dict[str, Path]:
+    zip_paths: dict[str, Path] = {}
+    for spec in PAPER_SPECS:
+        zip_path = SAMPLES_DIR / spec["zip_name"]
+        with zipfile.ZipFile(zip_path, "w") as archive:
+            for entry_path, content in spec["appendix_entries"].items():
+                archive.writestr(entry_path, content)
+        zip_paths[spec["slug"]] = zip_path
+    INVALID_PAPER_UPLOAD_PATH.write_text("not a zip archive", encoding="utf-8")
     return zip_paths
 
 
@@ -556,27 +618,52 @@ def validate_question_bundle(manifest: dict, names: list[str], question_ids: lis
         ensure(all(path in names for path in file_paths), "question bundle manifest paths must exist in zip")
 
 
-def validate_paper_bundle(manifest: dict, names: list[str], paper_ids: list[str]) -> None:
+def validate_paper_bundle(
+    manifest: dict,
+    names: list[str],
+    paper_ids: list[str],
+    bundle_path: Path,
+    expected_papers: dict[str, dict],
+) -> None:
     ensure(manifest["kind"] == "paper_bundle", "paper bundle manifest kind mismatch")
     ensure(manifest["paper_count"] == len(paper_ids), "paper bundle count mismatch")
     bundled_ids = [item["paper_id"] for item in manifest["papers"]]
     ensure(bundled_ids == paper_ids, "paper bundle ids should preserve request order")
-    for item in manifest["papers"]:
-        paper_prefix = f"{item['metadata']['description']}_"
-        ensure(item["directory"].startswith(paper_prefix), "paper bundle directory should start with description")
-        ensure(item["directory"] != item["paper_id"], "paper bundle directory should not use raw paper id")
-        ensure(item["questions"], "paper bundle should include at least one question")
-        for question in item["questions"]:
-            question_dir = question["directory"]
+    with zipfile.ZipFile(bundle_path, "r") as archive:
+        for item in manifest["papers"]:
+            expected = expected_papers[item["paper_id"]]
+            paper_prefix = f"{item['metadata']['description']}_"
+            ensure(item["directory"].startswith(paper_prefix), "paper bundle directory should start with description")
+            ensure(item["directory"] != item["paper_id"], "paper bundle directory should not use raw paper id")
+            ensure(item["metadata"]["title"] == expected["title"], "paper bundle title should round-trip")
+            ensure(item["metadata"]["subtitle"] == expected["subtitle"], "paper bundle subtitle should round-trip")
+            ensure(item["metadata"]["authors"] == expected["authors"], "paper bundle authors should round-trip")
+            ensure(item["metadata"]["reviewers"] == expected["reviewers"], "paper bundle reviewers should round-trip")
+
+            append_file = item["append_file"]
+            ensure(append_file["file_kind"] == "appendix", "paper appendix file kind mismatch")
+            ensure(append_file["zip_path"] == f"{item['directory']}/append.zip", "paper appendix should be renamed to append.zip")
+            ensure(append_file["original_path"] == expected["path"].name, "paper appendix manifest should keep original file name")
+            ensure(append_file["zip_path"] in names, "paper appendix path should exist in bundle")
+            append_bytes = archive.read(append_file["zip_path"])
+            ensure(append_bytes == expected["path"].read_bytes(), "paper appendix bytes should round-trip")
             ensure(
-                question_dir.startswith(f"{item['directory']}/"),
-                "paper question directory should live under the paper directory",
+                sorted(inspect_zip_bytes(append_bytes)) == sorted(expected["entries"]),
+                "paper appendix zip contents should round-trip",
             )
-            expected_prefix = f"{question_dir}/"
-            ensure(
-                any(name.startswith(expected_prefix) for name in names),
-                "paper bundle should include question folder contents",
-            )
+
+            ensure(item["questions"], "paper bundle should include at least one question")
+            for question in item["questions"]:
+                question_dir = question["directory"]
+                ensure(
+                    question_dir.startswith(f"{item['directory']}/"),
+                    "paper question directory should live under the paper directory",
+                )
+                expected_prefix = f"{question_dir}/"
+                ensure(
+                    any(name.startswith(expected_prefix) for name in names),
+                    "paper bundle should include question folder contents",
+                )
 
 
 def markdown_code_block(value) -> str:
@@ -586,18 +673,27 @@ def markdown_code_block(value) -> str:
 
 
 def summarize_sample_inputs() -> list[dict]:
-    summaries = []
-    for spec in QUESTION_SPECS:
-        summaries.append(
-            {
-                "slug": spec["slug"],
-                "upload_file": str(SAMPLES_DIR / spec["zip_name"]),
-                "zip_entries": [spec["tex_name"], *spec["assets"].keys()],
-                "create_difficulty": spec["create_difficulty"],
-                "metadata_patch": spec["patch"],
-            }
-        )
-    return summaries
+    return [
+        {
+            "kind": "question",
+            "slug": spec["slug"],
+            "upload_file": str(SAMPLES_DIR / spec["zip_name"]),
+            "zip_entries": [spec["tex_name"], *spec["assets"].keys()],
+            "create_difficulty": spec["create_difficulty"],
+            "metadata_patch": spec["patch"],
+        }
+        for spec in QUESTION_SPECS
+    ] + [
+        {
+            "kind": "paper",
+            "slug": spec["slug"],
+            "upload_file": str(SAMPLES_DIR / spec["zip_name"]),
+            "zip_entries": list(spec["appendix_entries"].keys()),
+            "create_metadata": spec["create"],
+            "metadata_patch": spec.get("patch"),
+        }
+        for spec in PAPER_SPECS
+    ]
 
 
 def write_report(status: str, error_text: str | None) -> None:
@@ -678,9 +774,11 @@ def main() -> None:
     run_error = None
 
     try:
-        print_step("[1/8] Build multiple sample question zips")
-        zip_paths = build_sample_zips()
+        print_step("[1/8] Build sample question and paper zips")
+        zip_paths = build_sample_question_zips()
+        paper_zip_paths = build_sample_paper_appendix_zips()
         validation_notes.append(f"Built {len(zip_paths)} sample question zips under {SAMPLES_DIR}.")
+        validation_notes.append(f"Built {len(paper_zip_paths)} sample paper appendix zips under {SAMPLES_DIR}.")
 
         print_step("[2/8] Start PostgreSQL container")
         start_postgres_container()
@@ -874,53 +972,105 @@ def main() -> None:
             "Question filters covered search, tag, category, difficulty tag, difficulty ranges, and invalid range validation."
         )
 
-        print_step("[6/8] Create papers and validate bundle downloads")
-        json_request(
+        print_step("[6/8] Create papers, patch metadata, and validate bundle downloads")
+
+        paper_a_fields = {
+            "description": PAPER_SPECS[0]["create"]["description"],
+            "title": PAPER_SPECS[0]["create"]["title"],
+            "subtitle": PAPER_SPECS[0]["create"]["subtitle"],
+            "authors": json.dumps(PAPER_SPECS[0]["create"]["authors"], ensure_ascii=False),
+            "reviewers": json.dumps(PAPER_SPECS[0]["create"]["reviewers"], ensure_ascii=False),
+            "question_ids": json.dumps(
+                [
+                    question_by_slug[slug]
+                    for slug in PAPER_SPECS[0]["create"]["question_slugs"]
+                ],
+                ensure_ascii=False,
+            ),
+        }
+        paper_b_fields = {
+            "description": PAPER_SPECS[1]["create"]["description"],
+            "title": PAPER_SPECS[1]["create"]["title"],
+            "subtitle": PAPER_SPECS[1]["create"]["subtitle"],
+            "authors": json.dumps(PAPER_SPECS[1]["create"]["authors"], ensure_ascii=False),
+            "reviewers": json.dumps(PAPER_SPECS[1]["create"]["reviewers"], ensure_ascii=False),
+            "question_ids": json.dumps(
+                [
+                    question_by_slug[slug]
+                    for slug in PAPER_SPECS[1]["create"]["question_slugs"]
+                ],
+                ensure_ascii=False,
+            ),
+        }
+
+        multipart_request(
+            "POST /papers missing title",
+            400,
+            path="/papers",
+            text_fields={key: value for key, value in paper_a_fields.items() if key != "title"},
+            field_name="file",
+            file_path=paper_zip_paths["mock-a"],
+            content_type="application/zip",
+        )
+        multipart_request(
             "POST /papers invalid description",
             400,
-            method="POST",
             path="/papers",
-            payload={
-                "edition": "2026",
-                "paper_type": "regular",
-                "description": "bad/name",
-                "question_ids": [
-                    question_by_slug["mechanics"],
-                    question_by_slug["optics"],
-                ],
-            },
+            text_fields={**paper_a_fields, "description": "bad/name"},
+            field_name="file",
+            file_path=paper_zip_paths["mock-a"],
+            content_type="application/zip",
         )
-        _, body, _ = json_request(
+        multipart_request(
+            "POST /papers invalid authors json",
+            400,
+            path="/papers",
+            text_fields={**paper_a_fields, "authors": "not-json"},
+            field_name="file",
+            file_path=paper_zip_paths["mock-a"],
+            content_type="application/zip",
+        )
+        multipart_request(
+            "POST /papers invalid upload zip",
+            400,
+            path="/papers",
+            text_fields=paper_a_fields,
+            field_name="file",
+            file_path=INVALID_PAPER_UPLOAD_PATH,
+            content_type="application/zip",
+        )
+        multipart_request(
+            "POST /papers unknown question_id",
+            400,
+            path="/papers",
+            text_fields={
+                **paper_a_fields,
+                "question_ids": json.dumps([str(uuid.uuid4())], ensure_ascii=False),
+            },
+            field_name="file",
+            file_path=paper_zip_paths["mock-a"],
+            content_type="application/zip",
+        )
+
+        _, body, _ = multipart_request(
             "POST /papers (mock-a)",
             200,
-            method="POST",
             path="/papers",
-            payload={
-                "edition": "2026",
-                "paper_type": "regular",
-                "description": "综合训练试卷 A",
-                "question_ids": [
-                    question_by_slug["mechanics"],
-                    question_by_slug["optics"],
-                ],
-            },
+            text_fields=paper_a_fields,
+            field_name="file",
+            file_path=paper_zip_paths["mock-a"],
+            content_type="application/zip",
         )
         paper_a_id = parse_json(body)["paper_id"]
 
-        _, body, _ = json_request(
+        _, body, _ = multipart_request(
             "POST /papers (mock-b)",
             200,
-            method="POST",
             path="/papers",
-            payload={
-                "edition": "2026",
-                "paper_type": "final",
-                "description": "热学决赛卷",
-                "question_ids": [
-                    question_by_slug["optics"],
-                    question_by_slug["thermal"],
-                ],
-            },
+            text_fields=paper_b_fields,
+            field_name="file",
+            file_path=paper_zip_paths["mock-b"],
+            content_type="application/zip",
         )
         paper_b_id = parse_json(body)["paper_id"]
         paper_ids = [paper_a_id, paper_b_id]
@@ -930,24 +1080,25 @@ def main() -> None:
         ensure(len(parse_json(body)) == 2, "paper list should contain two papers")
 
         _, body, _ = perform_request(
-            "GET /papers?q=热学",
+            "GET /papers?q=终稿",
             200,
-            path="/papers?q=%E7%83%AD%E5%AD%A6",
+            path="/papers?q=%E7%BB%88%E7%A8%BF",
         )
-        ensure(paper_b_id in body, "paper description search should return paper B")
+        ensure(paper_b_id in body, "paper subtitle search should return paper B")
 
         _, body, _ = perform_request(
-            "GET /papers?paper_type=final&category=E&tag=optics&q=热学",
+            "GET /papers?category=E&tag=optics&q=Fiona",
             200,
-            path="/papers?paper_type=final&category=E&tag=optics&q=%E7%83%AD%E5%AD%A6",
+            path="/papers?category=E&tag=optics&q=Fiona",
         )
         ensure(paper_b_id in body, "combined paper filters should return paper B")
 
-        perform_request(
+        _, body, _ = perform_request(
             "GET /papers/{paper_a}",
             200,
             path=f"/papers/{paper_a_id}",
         )
+        ensure("综合训练 2026 A 卷" in body, "paper detail should include initial title")
 
         _, body, _ = json_request(
             f"PATCH /papers/{paper_a_id}",
@@ -955,15 +1106,19 @@ def main() -> None:
             method="PATCH",
             path=f"/papers/{paper_a_id}",
             payload={
-                "description": "综合训练重排卷",
+                key: value
+                for key, value in PAPER_SPECS[0]["patch"].items()
+                if key != "question_slugs"
+            }
+            | {
                 "question_ids": [
-                    question_by_slug["thermal"],
-                    question_by_slug["mechanics"],
-                    question_by_slug["optics"],
+                    question_by_slug[slug]
+                    for slug in PAPER_SPECS[0]["patch"]["question_slugs"]
                 ],
             },
         )
         ensure("综合训练重排卷" in body, "paper patch should update description")
+        ensure("综合训练 2026 A 卷（修订）" in body, "paper patch should update title")
 
         json_request(
             f"PATCH /papers/{paper_a_id} invalid description",
@@ -971,6 +1126,37 @@ def main() -> None:
             method="PATCH",
             path=f"/papers/{paper_a_id}",
             payload={"description": "bad/name"},
+        )
+        json_request(
+            f"PATCH /papers/{paper_a_id} invalid question_ids",
+            400,
+            method="PATCH",
+            path=f"/papers/{paper_a_id}",
+            payload={"question_ids": []},
+        )
+
+        _, body, _ = perform_request(
+            "GET /papers/{paper_a} after patch",
+            200,
+            path=f"/papers/{paper_a_id}",
+        )
+        paper_a_detail = parse_json(body)
+        ensure(
+            paper_a_detail["authors"] == PAPER_SPECS[0]["patch"]["authors"],
+            "paper patch should update authors",
+        )
+        ensure(
+            paper_a_detail["reviewers"] == PAPER_SPECS[0]["patch"]["reviewers"],
+            "paper patch should update reviewers",
+        )
+        ensure(
+            [item["question_id"] for item in paper_a_detail["questions"]]
+            == [
+                question_by_slug["thermal"],
+                question_by_slug["mechanics"],
+                question_by_slug["optics"],
+            ],
+            "paper patch should update question order",
         )
 
         assert_question_query(
@@ -988,9 +1174,14 @@ def main() -> None:
             [question_by_slug["thermal"], question_by_slug["optics"]],
         )
         assert_question_query(
-            "GET /questions?paper_type=final&difficulty_tag=ml&difficulty_min=8&tag=optics",
-            "/questions?paper_type=final&difficulty_tag=ml&difficulty_min=8&tag=optics",
+            "GET /questions?paper_id={paper_a}&difficulty_tag=ml&difficulty_min=8&tag=optics",
+            f"/questions?paper_id={urllib.parse.quote(paper_a_id)}&difficulty_tag=ml&difficulty_min=8&tag=optics",
             [question_by_slug["optics"]],
+        )
+        assert_question_query(
+            "GET /questions?paper_id={paper_b}&difficulty_tag=human&difficulty_min=5",
+            f"/questions?paper_id={urllib.parse.quote(paper_b_id)}&difficulty_tag=human&difficulty_min=5",
+            [question_by_slug["optics"], question_by_slug["thermal"]],
         )
 
         question_bundle_path = DOWNLOADS_DIR / "questions_bundle.zip"
@@ -1012,7 +1203,30 @@ def main() -> None:
             payload={"paper_ids": paper_ids},
             output_path=paper_bundle_path,
         )
-        validate_paper_bundle(paper_manifest, paper_names, paper_ids)
+        validate_paper_bundle(
+            paper_manifest,
+            paper_names,
+            paper_ids,
+            paper_bundle_path,
+            {
+                paper_a_id: {
+                    "path": paper_zip_paths["mock-a"],
+                    "entries": list(PAPER_SPECS[0]["appendix_entries"].keys()),
+                    "title": PAPER_SPECS[0]["patch"]["title"],
+                    "subtitle": PAPER_SPECS[0]["patch"]["subtitle"],
+                    "authors": PAPER_SPECS[0]["patch"]["authors"],
+                    "reviewers": PAPER_SPECS[0]["patch"]["reviewers"],
+                },
+                paper_b_id: {
+                    "path": paper_zip_paths["mock-b"],
+                    "entries": list(PAPER_SPECS[1]["appendix_entries"].keys()),
+                    "title": PAPER_SPECS[1]["create"]["title"],
+                    "subtitle": PAPER_SPECS[1]["create"]["subtitle"],
+                    "authors": PAPER_SPECS[1]["create"]["authors"],
+                    "reviewers": PAPER_SPECS[1]["create"]["reviewers"],
+                },
+            },
+        )
         validation_notes.append(f"Saved paper bundle zip to {paper_bundle_path}.")
 
         print_step("[7/8] Run ops APIs and delete created data")

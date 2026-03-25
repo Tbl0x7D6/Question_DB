@@ -76,13 +76,6 @@ impl QuestionsParams {
                 .push("::uuid)");
             bind_count += 1;
         }
-        if let Some(paper_type) = &self.paper_type {
-            builder
-                .push(" AND EXISTS (SELECT 1 FROM paper_questions pq JOIN papers p ON p.paper_id = pq.paper_id WHERE pq.question_id = q.question_id AND p.paper_type = ")
-                .push_bind(paper_type)
-                .push(')');
-            bind_count += 1;
-        }
         if let Some(search) = &self.q {
             let needle = format!("%{search}%");
             builder
@@ -109,14 +102,6 @@ impl QuestionsParams {
 }
 
 pub(crate) fn validate_question_filters(params: &QuestionsParams) -> Result<()> {
-    if let Some(paper_type) = &params.paper_type {
-        let valid = ["regular", "semifinal", "final", "other"];
-        if !valid.contains(&paper_type.as_str()) {
-            return Err(anyhow!(
-                "paper_type must be one of: regular, semifinal, final, other"
-            ));
-        }
-    }
     if let Some(category) = &params.category {
         validate_question_category(category)
             .map_err(|_| anyhow!("category must be one of: none, T, E"))?;
@@ -184,9 +169,6 @@ pub(crate) async fn execute_questions_query(
     if let Some(paper_id) = &params.paper_id {
         query = query.bind(paper_id);
     }
-    if let Some(paper_type) = &params.paper_type {
-        query = query.bind(paper_type);
-    }
     if let Some(search) = &params.q {
         let needle = format!("%{search}%");
         query = query.bind(needle);
@@ -206,7 +188,6 @@ pub(crate) fn count_question_binds(params: &QuestionsParams) -> usize {
         + params.difficulty_min.as_ref().map(|_| 1).unwrap_or(0)
         + params.difficulty_max.as_ref().map(|_| 1).unwrap_or(0)
         + usize::from(params.paper_id.is_some())
-        + usize::from(params.paper_type.is_some())
         + params.q.as_ref().map(|_| 1).unwrap_or(0)
         + 2
 }
@@ -284,9 +265,11 @@ pub(crate) async fn load_question_files(
 pub(crate) fn map_paper_summary(row: PgRow) -> PaperSummary {
     PaperSummary {
         paper_id: row.get("paper_id"),
-        edition: row.get("edition"),
-        paper_type: row.get("paper_type"),
         description: row.get("description"),
+        title: row.get("title"),
+        subtitle: row.get("subtitle"),
+        authors: row.get("authors"),
+        reviewers: row.get("reviewers"),
         question_count: row.get("question_count"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -326,8 +309,9 @@ pub(crate) fn map_question_summary(
 pub(crate) fn map_question_paper_ref(row: PgRow) -> QuestionPaperRef {
     QuestionPaperRef {
         paper_id: row.get("paper_id"),
-        edition: row.get("edition"),
-        paper_type: row.get("paper_type"),
+        description: row.get("description"),
+        title: row.get("title"),
+        subtitle: row.get("subtitle"),
         sort_order: row.get("sort_order"),
     }
 }
@@ -361,9 +345,11 @@ pub(crate) fn map_question_detail(
 pub(crate) fn map_paper_detail(row: PgRow, questions: Vec<PaperQuestionSummary>) -> PaperDetail {
     PaperDetail {
         paper_id: row.get("paper_id"),
-        edition: row.get("edition"),
-        paper_type: row.get("paper_type"),
         description: row.get("description"),
+        title: row.get("title"),
+        subtitle: row.get("subtitle"),
+        authors: row.get("authors"),
+        reviewers: row.get("reviewers"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         questions,
