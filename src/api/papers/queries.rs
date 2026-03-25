@@ -16,9 +16,11 @@ impl PapersParams {
         let mut builder = QueryBuilder::<Postgres>::new(
             "
             SELECT p.paper_id::text AS paper_id,
-                   p.edition,
-                   p.paper_type,
                    p.description,
+                   p.title,
+                   p.subtitle,
+                   p.authors,
+                   p.reviewers,
                    COUNT(pq_count.question_id) AS question_count,
                    to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at,
                    to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at
@@ -33,10 +35,6 @@ impl PapersParams {
                 .push(" AND EXISTS (SELECT 1 FROM paper_questions pq WHERE pq.paper_id = p.paper_id AND pq.question_id = ")
                 .push_bind(question_id)
                 .push("::uuid)");
-            bind_count += 1;
-        }
-        if let Some(paper_type) = &self.paper_type {
-            builder.push(" AND p.paper_type = ").push_bind(paper_type);
             bind_count += 1;
         }
         if let Some(category) = &self.category {
@@ -55,7 +53,9 @@ impl PapersParams {
         }
         if let Some(search) = &self.q {
             let needle = format!("%{search}%");
-            builder.push(" AND p.description ILIKE ").push_bind(needle);
+            builder
+                .push(" AND CONCAT_WS(' ', p.description, p.title, p.subtitle, array_to_string(p.authors, ' '), array_to_string(p.reviewers, ' ')) ILIKE ")
+                .push_bind(needle);
             bind_count += 1;
         }
 
@@ -63,7 +63,7 @@ impl PapersParams {
         let offset = self.normalized_offset();
         builder
             .push(
-                " GROUP BY p.paper_id, p.edition, p.paper_type, p.description, p.created_at, p.updated_at",
+                " GROUP BY p.paper_id, p.description, p.title, p.subtitle, p.authors, p.reviewers, p.created_at, p.updated_at",
             )
             .push(" ORDER BY p.created_at DESC, p.paper_id LIMIT ")
             .push_bind(limit)
@@ -88,9 +88,6 @@ pub(crate) async fn execute_papers_query(
     if let Some(question_id) = &params.question_id {
         query = query.bind(question_id);
     }
-    if let Some(paper_type) = &params.paper_type {
-        query = query.bind(paper_type);
-    }
     if let Some(category) = &params.category {
         query = query.bind(category);
     }
@@ -111,7 +108,6 @@ pub(crate) async fn execute_papers_query(
 
 pub(crate) fn count_paper_binds(params: &PapersParams) -> usize {
     usize::from(params.question_id.is_some())
-        + usize::from(params.paper_type.is_some())
         + usize::from(params.category.is_some())
         + usize::from(params.tag.is_some())
         + usize::from(params.q.is_some())

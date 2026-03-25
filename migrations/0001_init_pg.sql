@@ -48,9 +48,12 @@ CREATE TABLE IF NOT EXISTS question_difficulties (
 
 CREATE TABLE IF NOT EXISTS papers (
     paper_id UUID PRIMARY KEY,
-    edition TEXT,
-    paper_type TEXT NOT NULL,
     description TEXT NOT NULL CHECK (btrim(description) <> ''),
+    title TEXT NOT NULL CHECK (btrim(title) <> ''),
+    subtitle TEXT NOT NULL CHECK (btrim(subtitle) <> ''),
+    authors TEXT[] NOT NULL DEFAULT '{}',
+    reviewers TEXT[] NOT NULL DEFAULT '{}',
+    append_object_id UUID NOT NULL REFERENCES objects(object_id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

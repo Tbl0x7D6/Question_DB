@@ -338,7 +338,7 @@ async fn fetch_question_detail(
 
     let papers = query(
         r#"
-        SELECT p.paper_id::text AS paper_id, p.edition, p.paper_type, pq.sort_order
+        SELECT p.paper_id::text AS paper_id, p.description, p.title, p.subtitle, pq.sort_order
         FROM paper_questions pq
         JOIN papers p ON p.paper_id = pq.paper_id
         WHERE pq.question_id = $1::uuid

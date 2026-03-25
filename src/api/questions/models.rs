@@ -51,8 +51,9 @@ pub struct QuestionSummary {
 #[derive(Debug, Serialize)]
 pub struct QuestionPaperRef {
     pub(crate) paper_id: String,
-    pub(crate) edition: Option<String>,
-    pub(crate) paper_type: String,
+    pub(crate) description: String,
+    pub(crate) title: String,
+    pub(crate) subtitle: String,
     pub(crate) sort_order: i32,
 }
 
@@ -75,7 +76,6 @@ pub struct QuestionDetail {
 #[derive(Debug, Deserialize)]
 pub(crate) struct QuestionsParams {
     pub(crate) paper_id: Option<String>,
-    pub(crate) paper_type: Option<String>,
     pub(crate) category: Option<String>,
     pub(crate) tag: Option<String>,
     pub(crate) difficulty_tag: Option<String>,

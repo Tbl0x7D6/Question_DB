@@ -1,0 +1,695 @@
+from __future__ import annotations
+
+import atexit
+import json
+import signal
+import traceback
+import urllib.parse
+
+from .fixtures import (
+    RealQuestionFixture,
+    build_real_theory_question_zips,
+    build_sample_paper_appendix_zips,
+    build_sample_question_zips,
+)
+from .session import TestSession, parse_json, question_ids_from_body
+from .specs import PAPER_APPENDIX_SPECS, QUESTION_SPECS
+from .validators import validate_paper_bundle, validate_question_bundle
+
+
+def assert_question_query(
+    session: TestSession,
+    label: str,
+    path: str,
+    expected_ids: list[str],
+) -> None:
+    _, body, _ = session.perform_request(label, 200, path=path)
+    actual_ids = question_ids_from_body(body)
+    session.ensure(
+        sorted(actual_ids) == sorted(expected_ids),
+        f"{label} should return {expected_ids}, got {actual_ids}",
+    )
+    session.validation_notes.append(f"{label} -> {actual_ids}")
+
+
+def upload_and_patch_synthetic_questions(
+    session: TestSession,
+    zip_paths: list,
+) -> tuple[list[str], dict[str, str]]:
+    question_ids: list[str] = []
+    question_by_slug: dict[str, str] = {}
+
+    session.multipart_request(
+        "POST /questions missing description",
+        400,
+        path="/questions",
+        text_fields=None,
+        field_name="file",
+        file_path=zip_paths[0],
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /questions missing difficulty",
+        400,
+        path="/questions",
+        text_fields={"description": QUESTION_SPECS[0]["create_description"]},
+        field_name="file",
+        file_path=zip_paths[0],
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /questions invalid description",
+        400,
+        path="/questions",
+        text_fields={
+            "description": "bad/name",
+            "difficulty": json.dumps(QUESTION_SPECS[0]["create_difficulty"], ensure_ascii=False),
+        },
+        field_name="file",
+        file_path=zip_paths[0],
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /questions invalid difficulty missing human",
+        400,
+        path="/questions",
+        text_fields={
+            "description": QUESTION_SPECS[0]["create_description"],
+            "difficulty": json.dumps({"heuristic": {"score": 5}}, ensure_ascii=False),
+        },
+        field_name="file",
+        file_path=zip_paths[0],
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /questions invalid difficulty score",
+        400,
+        path="/questions",
+        text_fields={
+            "description": QUESTION_SPECS[0]["create_description"],
+            "difficulty": json.dumps({"human": {"score": 11}}, ensure_ascii=False),
+        },
+        field_name="file",
+        file_path=zip_paths[0],
+        content_type="application/zip",
+    )
+
+    for spec, zip_path in zip(QUESTION_SPECS, zip_paths):
+        _, body, _ = session.multipart_request(
+            f"POST /questions ({spec['slug']})",
+            200,
+            path="/questions",
+            text_fields={
+                "description": spec["create_description"],
+                "difficulty": json.dumps(spec["create_difficulty"], ensure_ascii=False),
+            },
+            field_name="file",
+            file_path=zip_path,
+            content_type="application/zip",
+        )
+        response = parse_json(body)
+        question_id = response["question_id"]
+        session.ensure(response["status"] == "imported", "question import should report imported")
+        question_ids.append(question_id)
+        question_by_slug[spec["slug"]] = question_id
+
+    session.validation_notes.append(f"Created synthetic question ids: {question_by_slug}.")
+
+    for spec in QUESTION_SPECS:
+        question_id = question_by_slug[spec["slug"]]
+        session.json_request(
+            f"PATCH /questions/{question_id}",
+            200,
+            method="PATCH",
+            path=f"/questions/{question_id}",
+            payload=spec["patch"],
+        )
+
+    session.json_request(
+        f"PATCH /questions/{question_by_slug['mechanics']} invalid difficulty",
+        400,
+        method="PATCH",
+        path=f"/questions/{question_by_slug['mechanics']}",
+        payload={"difficulty": {"heuristic": {"score": 5}}},
+    )
+
+    _, body, _ = session.perform_request("GET /questions", 200, path="/questions?limit=10&offset=0")
+    session.ensure(len(parse_json(body)) == 3, "question list should contain three synthetic questions")
+
+    assert_question_query(
+        session,
+        "GET /questions?q=热学&difficulty_tag=human&difficulty_min=5&difficulty_max=5",
+        "/questions?q=%E7%83%AD%E5%AD%A6&difficulty_tag=human&difficulty_min=5&difficulty_max=5",
+        [question_by_slug["thermal"]],
+    )
+    assert_question_query(
+        session,
+        "GET /questions?category=T&tag=mechanics&difficulty_tag=human&difficulty_max=4",
+        "/questions?category=T&tag=mechanics&difficulty_tag=human&difficulty_max=4",
+        [question_by_slug["mechanics"]],
+    )
+    assert_question_query(
+        session,
+        "GET /questions?difficulty_tag=heuristic&difficulty_max=5",
+        "/questions?difficulty_tag=heuristic&difficulty_max=5",
+        [question_by_slug["mechanics"], question_by_slug["thermal"]],
+    )
+    assert_question_query(
+        session,
+        "GET /questions?tag=optics&difficulty_tag=symbolic&difficulty_min=8",
+        "/questions?tag=optics&difficulty_tag=symbolic&difficulty_min=8",
+        [question_by_slug["optics"]],
+    )
+    assert_question_query(
+        session,
+        "GET /questions?difficulty_tag=ml&difficulty_min=8&tag=optics&category=E",
+        "/questions?difficulty_tag=ml&difficulty_min=8&tag=optics&category=E",
+        [question_by_slug["optics"]],
+    )
+
+    session.perform_request(
+        "GET /questions invalid difficulty range without tag",
+        400,
+        path="/questions?difficulty_min=5",
+    )
+    session.perform_request(
+        "GET /questions invalid difficulty range order",
+        400,
+        path="/questions?difficulty_tag=human&difficulty_min=8&difficulty_max=3",
+    )
+
+    _, body, _ = session.perform_request(
+        "GET /questions/{mechanics}",
+        200,
+        path=f"/questions/{question_by_slug['mechanics']}",
+    )
+    mechanics_detail = parse_json(body)
+    session.ensure(
+        mechanics_detail["difficulty"]["human"]["score"] == 4,
+        "mechanics human difficulty should be updated to 4",
+    )
+    session.ensure(
+        mechanics_detail["difficulty"]["heuristic"]["notes"] == "fast estimate",
+        "mechanics heuristic notes should round-trip",
+    )
+
+    _, body, _ = session.perform_request(
+        "GET /questions/{optics}",
+        200,
+        path=f"/questions/{question_by_slug['optics']}",
+    )
+    optics_detail = parse_json(body)
+    session.ensure(
+        optics_detail["difficulty"]["symbolic"]["score"] == 9,
+        "optics symbolic difficulty should be present",
+    )
+    session.ensure(
+        optics_detail["difficulty"]["ml"]["notes"] == "vision model struggle",
+        "optics ml difficulty notes should round-trip",
+    )
+
+    question_bundle_path = session.downloads_dir / "questions_bundle_synthetic.zip"
+    question_manifest, question_names = session.binary_json_request(
+        "POST /questions/bundles (synthetic)",
+        200,
+        path="/questions/bundles",
+        payload={"question_ids": question_ids},
+        output_path=question_bundle_path,
+    )
+    validate_question_bundle(question_manifest, question_names, question_ids, session.ensure)
+    session.validation_notes.append(f"Saved synthetic question bundle zip to {question_bundle_path}.")
+
+    return question_ids, question_by_slug
+
+
+def upload_real_theory_questions(
+    session: TestSession,
+    fixtures: list[RealQuestionFixture],
+) -> tuple[list[str], dict[str, str], dict[str, RealQuestionFixture]]:
+    question_ids: list[str] = []
+    question_by_slug: dict[str, str] = {}
+    fixture_by_slug = {fixture.slug: fixture for fixture in fixtures}
+
+    for fixture in fixtures:
+        _, body, _ = session.multipart_request(
+            f"POST /questions ({fixture.slug})",
+            200,
+            path="/questions",
+            text_fields={
+                "description": fixture.create_description,
+                "difficulty": json.dumps(fixture.create_difficulty, ensure_ascii=False),
+            },
+            field_name="file",
+            file_path=fixture.upload_path,
+            content_type="application/zip",
+        )
+        response = parse_json(body)
+        question_id = response["question_id"]
+        session.ensure(response["status"] == "imported", "real question import should report imported")
+        session.ensure(
+            response["imported_assets"] == fixture.asset_count,
+            f"{fixture.slug} imported asset count should match fixture contents",
+        )
+        question_ids.append(question_id)
+        question_by_slug[fixture.slug] = question_id
+
+        session.json_request(
+            f"PATCH /questions/{question_id} ({fixture.slug})",
+            200,
+            method="PATCH",
+            path=f"/questions/{question_id}",
+            payload=fixture.patch,
+        )
+
+    first_id = question_ids[0]
+    _, body, _ = session.perform_request(
+        "GET /questions/{real-theory-1}",
+        200,
+        path=f"/questions/{first_id}",
+    )
+    first_detail = parse_json(body)
+    session.ensure(first_detail["category"] == "T", "real theory question should be patched to T")
+    session.ensure(
+        first_detail["status"] in {"reviewed", "used"},
+        "real theory question should be patched to a publishable status",
+    )
+
+    assert_question_query(
+        session,
+        "GET /questions?category=T&tag=real-batch",
+        "/questions?category=T&tag=real-batch",
+        question_ids,
+    )
+
+    session.validation_notes.append(f"Created real theory question ids: {question_by_slug}.")
+    return question_ids, question_by_slug, fixture_by_slug
+
+
+def run_real_paper_flow(
+    session: TestSession,
+    appendix_paths: dict[str, object],
+    sample_question_by_slug: dict[str, str],
+    real_question_ids: list[str],
+    real_question_by_slug: dict[str, str],
+    real_fixtures_by_slug: dict[str, RealQuestionFixture],
+) -> tuple[list[str], list[str]]:
+    first_four_real_ids = real_question_ids[:4]
+    reversed_first_four_real_ids = list(reversed(first_four_real_ids))
+
+    paper_a_fields = {
+        "description": "真实理论联考 A",
+        "title": "真实理论联考 A 卷",
+        "subtitle": "回归测试 初版",
+        "authors": json.dumps(["张三", "李四五"], ensure_ascii=False),
+        "reviewers": json.dumps(["王五", "赵六七"], ensure_ascii=False),
+        "question_ids": json.dumps(first_four_real_ids, ensure_ascii=False),
+    }
+    paper_b_fields = {
+        "description": "真实理论联考 B",
+        "title": "真实理论联考 B 卷",
+        "subtitle": "六题完整版",
+        "authors": json.dumps(["陈一", "孙二三"], ensure_ascii=False),
+        "reviewers": json.dumps(["周四", "吴五六"], ensure_ascii=False),
+        "question_ids": json.dumps(real_question_ids, ensure_ascii=False),
+    }
+
+    session.multipart_request(
+        "POST /papers missing title",
+        400,
+        path="/papers",
+        text_fields={key: value for key, value in paper_a_fields.items() if key != "title"},
+        field_name="file",
+        file_path=appendix_paths["mock-a"],
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /papers invalid description",
+        400,
+        path="/papers",
+        text_fields={**paper_a_fields, "description": "bad/name"},
+        field_name="file",
+        file_path=appendix_paths["mock-a"],
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /papers invalid authors json",
+        400,
+        path="/papers",
+        text_fields={**paper_a_fields, "authors": "not-json"},
+        field_name="file",
+        file_path=appendix_paths["mock-a"],
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /papers invalid upload zip",
+        400,
+        path="/papers",
+        text_fields=paper_a_fields,
+        field_name="file",
+        file_path=session.invalid_paper_upload_path,
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /papers unknown question_id",
+        400,
+        path="/papers",
+        text_fields={
+            **paper_a_fields,
+            "question_ids": json.dumps([real_question_ids[0], "550e8400-e29b-41d4-a716-446655440000"], ensure_ascii=False),
+        },
+        field_name="file",
+        file_path=appendix_paths["mock-a"],
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /papers mixed category questions",
+        400,
+        path="/papers",
+        text_fields={
+            **paper_a_fields,
+            "question_ids": json.dumps(
+                [sample_question_by_slug["mechanics"], sample_question_by_slug["optics"]],
+                ensure_ascii=False,
+            ),
+        },
+        field_name="file",
+        file_path=appendix_paths["mock-a"],
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /papers question status none",
+        400,
+        path="/papers",
+        text_fields={
+            **paper_a_fields,
+            "question_ids": json.dumps(
+                [sample_question_by_slug["mechanics"], sample_question_by_slug["thermal"]],
+                ensure_ascii=False,
+            ),
+        },
+        field_name="file",
+        file_path=appendix_paths["mock-a"],
+        content_type="application/zip",
+    )
+
+    _, body, _ = session.multipart_request(
+        "POST /papers (real mock-a)",
+        200,
+        path="/papers",
+        text_fields=paper_a_fields,
+        field_name="file",
+        file_path=appendix_paths["mock-a"],
+        content_type="application/zip",
+    )
+    paper_a_id = parse_json(body)["paper_id"]
+
+    _, body, _ = session.multipart_request(
+        "POST /papers (real mock-b)",
+        200,
+        path="/papers",
+        text_fields=paper_b_fields,
+        field_name="file",
+        file_path=appendix_paths["mock-b"],
+        content_type="application/zip",
+    )
+    paper_b_id = parse_json(body)["paper_id"]
+    paper_ids = [paper_a_id, paper_b_id]
+    session.validation_notes.append(f"Created real paper ids: {paper_ids}.")
+
+    _, body, _ = session.perform_request("GET /papers", 200, path="/papers")
+    session.ensure(len(parse_json(body)) == 2, "paper list should contain two real papers")
+
+    _, body, _ = session.perform_request(
+        "GET /papers?q=完整版",
+        200,
+        path="/papers?q=%E5%AE%8C%E6%95%B4%E7%89%88",
+    )
+    session.ensure(paper_b_id in body, "paper subtitle search should return paper B")
+
+    _, body, _ = session.perform_request(
+        "GET /papers?category=T&tag=real-batch&q=张三",
+        200,
+        path="/papers?category=T&tag=real-batch&q=%E5%BC%A0%E4%B8%89",
+    )
+    session.ensure(paper_a_id in body, "combined paper filters should return paper A")
+
+    _, body, _ = session.perform_request(
+        "GET /papers/{paper_a}",
+        200,
+        path=f"/papers/{paper_a_id}",
+    )
+    paper_a_detail = parse_json(body)
+    session.ensure(
+        [item["question_id"] for item in paper_a_detail["questions"]] == first_four_real_ids,
+        "paper A should preserve its initial real question order",
+    )
+
+    _, body, _ = session.json_request(
+        f"PATCH /papers/{paper_a_id}",
+        200,
+        method="PATCH",
+        path=f"/papers/{paper_a_id}",
+        payload={
+            "description": "真实理论联考 A（修订）",
+            "title": "真实理论联考 A 卷（修订）",
+            "subtitle": "回归测试 终版",
+            "authors": ["张三", "赵八九"],
+            "reviewers": ["王五", "孙二"],
+            "question_ids": reversed_first_four_real_ids,
+        },
+    )
+    patched_paper_a = parse_json(body)
+    session.ensure(
+        patched_paper_a["title"] == "真实理论联考 A 卷（修订）",
+        "paper patch should update the title",
+    )
+
+    session.json_request(
+        f"PATCH /papers/{paper_a_id} invalid description",
+        400,
+        method="PATCH",
+        path=f"/papers/{paper_a_id}",
+        payload={"description": "bad/name"},
+    )
+    session.json_request(
+        f"PATCH /papers/{paper_a_id} invalid question_ids",
+        400,
+        method="PATCH",
+        path=f"/papers/{paper_a_id}",
+        payload={"question_ids": []},
+    )
+    session.json_request(
+        f"PATCH /papers/{paper_a_id} mixed category",
+        400,
+        method="PATCH",
+        path=f"/papers/{paper_a_id}",
+        payload={"question_ids": [real_question_ids[0], sample_question_by_slug["optics"]]},
+    )
+
+    _, body, _ = session.perform_request(
+        "GET /papers/{paper_a} after patch",
+        200,
+        path=f"/papers/{paper_a_id}",
+    )
+    paper_a_detail = parse_json(body)
+    session.ensure(
+        paper_a_detail["authors"] == ["张三", "赵八九"],
+        "paper patch should update authors",
+    )
+    session.ensure(
+        paper_a_detail["reviewers"] == ["王五", "孙二"],
+        "paper patch should update reviewers",
+    )
+    session.ensure(
+        [item["question_id"] for item in paper_a_detail["questions"]] == reversed_first_four_real_ids,
+        "paper patch should update question order",
+    )
+
+    assert_question_query(
+        session,
+        "GET /questions?paper_id={paper_a}",
+        f"/questions?paper_id={urllib.parse.quote(paper_a_id)}",
+        reversed_first_four_real_ids,
+    )
+    assert_question_query(
+        session,
+        "GET /questions?paper_id={paper_b}&tag=real-batch&category=T",
+        f"/questions?paper_id={urllib.parse.quote(paper_b_id)}&tag=real-batch&category=T",
+        real_question_ids,
+    )
+
+    paper_bundle_path = session.downloads_dir / "papers_bundle_real.zip"
+    paper_manifest, paper_names = session.binary_json_request(
+        "POST /papers/bundles (real theory)",
+        200,
+        path="/papers/bundles",
+        payload={"paper_ids": paper_ids},
+        output_path=paper_bundle_path,
+    )
+
+    asset_count_by_id = {
+        real_question_by_slug[fixture.slug]: fixture.asset_count for fixture in real_fixtures_by_slug.values()
+    }
+    validate_paper_bundle(
+        paper_manifest,
+        paper_names,
+        paper_ids,
+        paper_bundle_path,
+        {
+            paper_a_id: {
+                "appendix_path": appendix_paths["mock-a"],
+                "title": "真实理论联考 A 卷（修订）",
+                "subtitle": "回归测试 终版",
+                "authors": ["张三", "赵八九"],
+                "reviewers": ["王五", "孙二"],
+                "question_ids": reversed_first_four_real_ids,
+                "asset_total": sum(asset_count_by_id[question_id] for question_id in reversed_first_four_real_ids),
+            },
+            paper_b_id: {
+                "appendix_path": appendix_paths["mock-b"],
+                "title": "真实理论联考 B 卷",
+                "subtitle": "六题完整版",
+                "authors": ["陈一", "孙二三"],
+                "reviewers": ["周四", "吴五六"],
+                "question_ids": real_question_ids,
+                "asset_total": sum(asset_count_by_id[question_id] for question_id in real_question_ids),
+            },
+        },
+        session.ensure,
+    )
+    session.validation_notes.append(f"Saved real paper bundle zip to {paper_bundle_path}.")
+
+    return paper_ids, [*real_question_ids]
+
+
+def run_ops_and_cleanup(
+    session: TestSession,
+    paper_ids: list[str],
+    real_question_ids: list[str],
+    synthetic_question_ids: list[str],
+) -> None:
+    _, body, _ = session.json_request(
+        "POST /exports/run",
+        200,
+        method="POST",
+        path="/exports/run",
+        payload={
+            "format": "jsonl",
+            "public": False,
+            "output_path": str(session.export_path),
+        },
+    )
+    export_response = parse_json(body)
+    session.ensure(export_response["exported_questions"] == 9, "export should include all nine questions")
+
+    _, body, _ = session.json_request(
+        "POST /quality-checks/run",
+        200,
+        method="POST",
+        path="/quality-checks/run",
+        payload={"output_path": str(session.quality_path)},
+    )
+    quality_response = parse_json(body)
+    session.ensure("empty_papers" in quality_response["report"], "quality report should include empty_papers")
+
+    for paper_id in reversed(paper_ids):
+        session.perform_request(
+            f"DELETE /papers/{paper_id}",
+            200,
+            method="DELETE",
+            path=f"/papers/{paper_id}",
+        )
+    session.perform_request(
+        f"GET /papers/{paper_ids[0]} after delete",
+        404,
+        path=f"/papers/{paper_ids[0]}",
+    )
+
+    for question_id in reversed(real_question_ids + synthetic_question_ids):
+        session.perform_request(
+            f"DELETE /questions/{question_id}",
+            200,
+            method="DELETE",
+            path=f"/questions/{question_id}",
+        )
+    session.perform_request(
+        f"GET /questions/{real_question_ids[0]} after delete",
+        404,
+        path=f"/questions/{real_question_ids[0]}",
+    )
+
+    session.validation_notes.append(
+        "Synthetic question CRUD/filter coverage, real-theory paper bundle coverage, export, quality-check, and delete assertions all passed."
+    )
+
+
+def main() -> None:
+    session = TestSession()
+
+    def handle_signal(signum: int, _frame) -> None:
+        session.cleanup()
+        raise SystemExit(128 + signum)
+
+    atexit.register(session.cleanup)
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    session.prepare_workspace()
+    run_status = "passed"
+    run_error = None
+
+    try:
+        session.print_step("[1/8] Build synthetic and real fixture zips")
+        synthetic_zip_paths = build_sample_question_zips(session)
+        appendix_paths = build_sample_paper_appendix_zips(session)
+        real_fixtures = build_real_theory_question_zips(session)
+        session.validation_notes.append(f"Built {len(synthetic_zip_paths)} synthetic question zips.")
+        session.validation_notes.append(f"Built {len(appendix_paths)} paper appendix zips.")
+        session.validation_notes.append(f"Built {len(real_fixtures)} real theory question zips from test.zip.")
+
+        session.print_step("[2/8] Start PostgreSQL container")
+        session.start_postgres_container()
+
+        session.print_step("[3/8] Apply migration")
+        session.apply_migration()
+
+        session.print_step("[4/8] Start API")
+        session.start_api()
+        session.perform_request("GET /health", 200, path="/health")
+
+        session.print_step("[5/8] Run synthetic question CRUD and bundle checks")
+        synthetic_question_ids, synthetic_question_by_slug = upload_and_patch_synthetic_questions(
+            session, synthetic_zip_paths
+        )
+
+        session.print_step("[6/8] Upload real theory questions and exercise paper flows")
+        real_question_ids, real_question_by_slug, real_fixtures_by_slug = upload_real_theory_questions(
+            session, real_fixtures
+        )
+        paper_ids, created_real_question_ids = run_real_paper_flow(
+            session,
+            appendix_paths,
+            synthetic_question_by_slug,
+            real_question_ids,
+            real_question_by_slug,
+            real_fixtures_by_slug,
+        )
+
+        session.print_step("[7/8] Run ops APIs and delete created data")
+        run_ops_and_cleanup(
+            session,
+            paper_ids,
+            created_real_question_ids,
+            synthetic_question_ids,
+        )
+    except Exception:
+        run_status = "failed"
+        run_error = traceback.format_exc()
+        raise
+    finally:
+        session.print_step("[8/8] Write markdown report")
+        session.write_report(run_status, run_error)
+
+
+if __name__ == "__main__":
+    main()

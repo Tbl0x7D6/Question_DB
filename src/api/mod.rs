@@ -27,6 +27,8 @@ pub fn router(state: AppState) -> Router {
         .merge(papers::router())
         .merge(questions::router())
         .merge(ops::router())
-        .layer(DefaultBodyLimit::max(questions::MAX_UPLOAD_BYTES))
+        .layer(DefaultBodyLimit::max(
+            questions::MAX_UPLOAD_BYTES.max(papers::MAX_UPLOAD_BYTES),
+        ))
         .with_state(state)
 }
