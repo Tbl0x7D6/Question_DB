@@ -17,6 +17,8 @@
 - `authors`: 必填，JSON 字符串数组，例如 `["Alice","Bob"]`
 - `reviewers`: 必填，JSON 字符串数组，例如 `["Carol"]`
 - `question_ids`: 必填，JSON 字符串数组，例如 `["uuid-1","uuid-2"]`
+  - 这些题目必须全部属于同一类：要么全部是 `T`，要么全部是 `E`
+  - 每道题的 `status` 必须是 `reviewed` 或 `used`
 
 示例：
 
@@ -68,6 +70,9 @@ curl -X POST http://127.0.0.1:8080/papers \
 - `title` / `subtitle` 如果出现在更新请求里，必须是非空字符串
 - `authors` / `reviewers` 如果出现在更新请求里，必须是字符串数组
 - `question_ids` 如果出现在更新请求里，必须是非空 UUID 字符串数组；成功后会按数组顺序重排题目
+- 更新请求会校验试卷更新后的整套题目：
+  - `category` 必须全部同为 `T` 或全部同为 `E`
+  - 每道题的 `status` 必须是 `reviewed` 或 `used`
 
 成功时返回更新后的完整试卷详情。
 
@@ -101,5 +106,11 @@ curl -X POST http://127.0.0.1:8080/papers \
 - 响应体是一个 `application/zip`
 - zip 根目录包含 `manifest.json`
 - 每个试卷使用 `description_uuid前缀/` 目录分组，例如 `热学决赛卷_550e84/`
-- 每个试卷目录下会额外包含上传时保存的附加 zip，并统一命名为 `append.zip`
-- 每个试卷目录下再按 `description_uuid前缀/` 展开题目的 `.tex` 和 `assets/` 文件
+- 每个试卷目录下包含：
+  - `append.zip`
+  - `main.tex`
+  - 单个合并后的 `assets/` 目录
+- `main.tex` 基于内置的 `CPHOS-Latex` 理论/实验 `example-paper.tex` 模板生成
+- 题目会按试卷中的顺序依次注入 `main.tex`
+- 每道题原始 tex 中的 `\includegraphics` 资源引用会被改写到合并后的 `assets/` 目录
+- 每道题内部的 `\label` / `\ref` / `\eqref` 等标签会按 `p1-`、`p2-` 这样的前缀重写，避免跨题冲突

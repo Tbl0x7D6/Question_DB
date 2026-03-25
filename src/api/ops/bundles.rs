@@ -18,6 +18,10 @@ use uuid::Uuid;
 use zip::{write::SimpleFileOptions, ZipWriter};
 
 use crate::api::{
+    ops::paper_render::{
+        render_paper_bundle, PaperTemplateKind, RenderPaperInput, RenderQuestionAssetInput,
+        RenderQuestionInput,
+    },
     papers::models::PaperDetail,
     questions::{
         models::{QuestionAssetRef, QuestionDetail, QuestionPaperRef},
@@ -58,16 +62,20 @@ struct PaperBundleManifestItem {
     paper_id: String,
     directory: String,
     metadata: PaperDetail,
+    template_source: String,
     append_file: BundleFileEntry,
+    main_tex_file: BundleFileEntry,
+    assets: Vec<BundleFileEntry>,
     questions: Vec<PaperBundleQuestionManifestItem>,
 }
 
 #[derive(Debug, Serialize)]
 struct PaperBundleQuestionManifestItem {
     question_id: String,
-    directory: String,
+    sequence: usize,
+    source_tex_path: String,
+    asset_prefix: String,
     metadata: QuestionDetail,
-    files: Vec<BundleFileEntry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,7 +83,10 @@ struct BundleFileEntry {
     zip_path: String,
     original_path: String,
     file_kind: String,
-    object_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_question_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_id: Option<String>,
     mime_type: Option<String>,
 }
 
@@ -157,36 +168,60 @@ pub(crate) async fn build_paper_bundle_response(
         let directory = bundle_directory_name(&bundle.metadata.description, paper_id);
         let append_file =
             write_paper_appendix_file(pool, &mut writer, &bundle.appendix, &directory).await?;
-        let mut question_entries = Vec::with_capacity(bundle.questions.len());
+        let rendered = render_paper_bundle(build_render_paper_input(pool, &bundle).await?)?;
 
-        for question in bundle.questions {
-            let question_directory = format!(
-                "{directory}/{}",
-                bundle_directory_name(
-                    &question.metadata.description,
-                    &question.metadata.question_id
-                )
-            );
-            let manifest_files = write_question_bundle_files(
-                pool,
-                &mut writer,
-                &question.files,
-                &question_directory,
-            )
-            .await?;
-            question_entries.push(PaperBundleQuestionManifestItem {
-                question_id: question.metadata.question_id.clone(),
-                directory: question_directory,
-                metadata: question.metadata,
-                files: manifest_files,
+        let main_tex_zip_path = format!("{directory}/main.tex");
+        write_bundle_file(
+            &mut writer,
+            &main_tex_zip_path,
+            rendered.main_tex.as_bytes(),
+        )?;
+        let main_tex_file = BundleFileEntry {
+            zip_path: main_tex_zip_path,
+            original_path: rendered.template_source_path.to_string(),
+            file_kind: "rendered_tex".to_string(),
+            source_question_id: None,
+            object_id: None,
+            mime_type: Some("text/x-tex".to_string()),
+        };
+
+        let mut rendered_asset_entries = Vec::with_capacity(rendered.assets.len());
+        for asset in &rendered.assets {
+            let zip_path = format!("{directory}/{}", asset.output_path);
+            write_bundle_file(&mut writer, &zip_path, &asset.bytes)?;
+            rendered_asset_entries.push(BundleFileEntry {
+                zip_path,
+                original_path: asset.original_path.clone(),
+                file_kind: "asset".to_string(),
+                source_question_id: Some(asset.question_id.clone()),
+                object_id: Some(asset.object_id.clone()),
+                mime_type: asset.mime_type.clone(),
             });
         }
+
+        let question_entries = bundle
+            .questions
+            .into_iter()
+            .zip(rendered.questions.into_iter())
+            .map(
+                |(question, rendered_question)| PaperBundleQuestionManifestItem {
+                    question_id: rendered_question.question_id,
+                    sequence: rendered_question.sequence,
+                    source_tex_path: rendered_question.source_tex_path,
+                    asset_prefix: rendered_question.asset_prefix,
+                    metadata: question.metadata,
+                },
+            )
+            .collect::<Vec<_>>();
 
         manifest_items.push(PaperBundleManifestItem {
             paper_id: paper_id.clone(),
             directory,
             metadata: bundle.metadata,
+            template_source: rendered.template_source_path.to_string(),
             append_file,
+            main_tex_file,
+            assets: rendered_asset_entries,
             questions: question_entries,
         });
     }
@@ -218,7 +253,8 @@ async fn write_question_bundle_files(
             zip_path,
             original_path: file.path.clone(),
             file_kind: file.file_kind.clone(),
-            object_id: file.object_id.clone(),
+            source_question_id: None,
+            object_id: Some(file.object_id.clone()),
             mime_type: file.mime_type.clone(),
         });
     }
@@ -240,7 +276,8 @@ async fn write_paper_appendix_file(
         zip_path,
         original_path: appendix.original_file_name.clone(),
         file_kind: "appendix".to_string(),
-        object_id: appendix.object_id.clone(),
+        source_question_id: None,
+        object_id: Some(appendix.object_id.clone()),
         mime_type: appendix.mime_type.clone(),
     })
 }
@@ -421,6 +458,79 @@ async fn load_paper_bundle_data(pool: &PgPool, paper_id: &str) -> Result<PaperBu
         appendix,
         questions,
     })
+}
+
+async fn build_render_paper_input(
+    pool: &PgPool,
+    bundle: &PaperBundleData,
+) -> Result<RenderPaperInput> {
+    let template_kind = determine_paper_template_kind(&bundle.questions)?;
+    let mut questions = Vec::with_capacity(bundle.questions.len());
+
+    for (index, question) in bundle.questions.iter().enumerate() {
+        let tex_bytes = fetch_object_bytes(pool, &question.metadata.tex_object_id).await?;
+        let source_tex = String::from_utf8(tex_bytes).with_context(|| {
+            format!(
+                "question tex object is not valid UTF-8: {}",
+                question.metadata.tex_object_id
+            )
+        })?;
+
+        let mut assets = Vec::with_capacity(question.metadata.assets.len());
+        for asset in &question.metadata.assets {
+            assets.push(RenderQuestionAssetInput {
+                original_path: asset.path.clone(),
+                object_id: asset.object_id.clone(),
+                mime_type: asset.mime_type.clone(),
+                bytes: fetch_object_bytes(pool, &asset.object_id).await?,
+            });
+        }
+
+        questions.push(RenderQuestionInput {
+            question_id: question.metadata.question_id.clone(),
+            sequence: index + 1,
+            source_tex_path: question.metadata.source.tex.clone(),
+            source_tex,
+            assets,
+        });
+    }
+
+    Ok(RenderPaperInput {
+        title: bundle.metadata.title.clone(),
+        subtitle: bundle.metadata.subtitle.clone(),
+        authors: bundle.metadata.authors.clone(),
+        reviewers: bundle.metadata.reviewers.clone(),
+        template_kind,
+        questions,
+    })
+}
+
+fn determine_paper_template_kind(questions: &[QuestionBundleData]) -> Result<PaperTemplateKind> {
+    let first_question = questions
+        .first()
+        .ok_or_else(|| anyhow!("paper does not contain any questions"))?;
+    let expected_category = first_question.metadata.category.as_str();
+    let template_kind = match expected_category {
+        "T" => PaperTemplateKind::Theory,
+        "E" => PaperTemplateKind::Experiment,
+        other => {
+            return Err(anyhow!(
+                "paper questions must all be category T or E before rendering, found {other}"
+            ));
+        }
+    };
+
+    for question in questions.iter().skip(1) {
+        if question.metadata.category != expected_category {
+            return Err(anyhow!(
+                "paper questions must share one category before rendering, found {} and {}",
+                expected_category,
+                question.metadata.category
+            ));
+        }
+    }
+
+    Ok(template_kind)
 }
 
 async fn fetch_object_bytes(pool: &PgPool, object_id: &str) -> Result<Vec<u8>> {
