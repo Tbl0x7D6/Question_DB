@@ -11,10 +11,17 @@ def validate_question_bundle(
     question_ids: list[str],
     ensure,
 ) -> None:
-    ensure(manifest["kind"] == "question_bundle", "question bundle manifest kind mismatch")
-    ensure(manifest["question_count"] == len(question_ids), "question bundle count mismatch")
+    ensure(
+        manifest["kind"] == "question_bundle", "question bundle manifest kind mismatch"
+    )
+    ensure(
+        manifest["question_count"] == len(question_ids),
+        "question bundle count mismatch",
+    )
     bundled_ids = [item["question_id"] for item in manifest["questions"]]
-    ensure(bundled_ids == question_ids, "question bundle ids should preserve request order")
+    ensure(
+        bundled_ids == question_ids, "question bundle ids should preserve request order"
+    )
     for item in manifest["questions"]:
         expected_prefix = f"{item['metadata']['description']}_"
         ensure(
@@ -30,9 +37,18 @@ def validate_question_bundle(
             all(path.startswith(f"{item['directory']}/") for path in file_paths),
             "question bundle files should live under the description directory",
         )
-        ensure(any(path.endswith(".tex") for path in file_paths), "question bundle should include tex")
-        ensure(any("/assets/" in path for path in file_paths), "question bundle should include assets")
-        ensure(all(path in names for path in file_paths), "question bundle manifest paths must exist in zip")
+        ensure(
+            any(path.endswith(".tex") for path in file_paths),
+            "question bundle should include tex",
+        )
+        ensure(
+            any("/assets/" in path for path in file_paths),
+            "question bundle should include assets",
+        )
+        ensure(
+            all(path in names for path in file_paths),
+            "question bundle manifest paths must exist in zip",
+        )
 
 
 def validate_paper_bundle(
@@ -41,6 +57,9 @@ def validate_paper_bundle(
     paper_ids: list[str],
     bundle_path: Path,
     expected_papers: dict[str, dict],
+    expected_template_source: str,
+    expected_category: str,
+    sample_problem_title: str,
     ensure,
 ) -> None:
     ensure(manifest["kind"] == "paper_bundle", "paper bundle manifest kind mismatch")
@@ -61,10 +80,13 @@ def validate_paper_bundle(
                 "paper bundle directory should not use raw paper id",
             )
             ensure(
-                item["template_source"] == "CPHOS-Latex/theory/examples/example-paper.tex",
-                "real theory bundle should use the theory paper template",
+                item["template_source"] == expected_template_source,
+                "paper bundle should use the expected paper template",
             )
-            ensure(item["metadata"]["title"] == expected["title"], "paper title should round-trip")
+            ensure(
+                item["metadata"]["title"] == expected["title"],
+                "paper title should round-trip",
+            )
             ensure(
                 item["metadata"]["subtitle"] == expected["subtitle"],
                 "paper subtitle should round-trip",
@@ -79,7 +101,10 @@ def validate_paper_bundle(
             )
 
             append_file = item["append_file"]
-            ensure(append_file["file_kind"] == "appendix", "paper appendix file kind mismatch")
+            ensure(
+                append_file["file_kind"] == "appendix",
+                "paper appendix file kind mismatch",
+            )
             ensure(
                 append_file["zip_path"] == f"{item['directory']}/append.zip",
                 "paper appendix should be renamed to append.zip",
@@ -88,7 +113,10 @@ def validate_paper_bundle(
                 append_file["original_path"] == expected["appendix_path"].name,
                 "paper appendix manifest should keep original file name",
             )
-            ensure(append_file["zip_path"] in names, "paper appendix path should exist in bundle")
+            ensure(
+                append_file["zip_path"] in names,
+                "paper appendix path should exist in bundle",
+            )
             append_bytes = archive.read(append_file["zip_path"])
             ensure(
                 append_bytes == expected["appendix_path"].read_bytes(),
@@ -107,9 +135,12 @@ def validate_paper_bundle(
                 main_tex_file["zip_path"] == f"{item['directory']}/main.tex",
                 "paper bundle should expose main.tex at the paper root",
             )
-            ensure(main_tex_file["zip_path"] in names, "main.tex should exist in the bundle")
             ensure(
-                main_tex_file["original_path"] == "CPHOS-Latex/theory/examples/example-paper.tex",
+                main_tex_file["zip_path"] in names,
+                "main.tex should exist in the bundle",
+            )
+            ensure(
+                main_tex_file["original_path"] == expected_template_source,
                 "main.tex manifest should record the source template path",
             )
             main_tex = archive.read(main_tex_file["zip_path"]).decode("utf-8")
@@ -126,7 +157,7 @@ def validate_paper_bundle(
                 "rendered main.tex should contain one problem block per paper question",
             )
             ensure(
-                "太阳物理初步" not in main_tex,
+                sample_problem_title not in main_tex,
                 "rendered main.tex should not keep the template sample problem",
             )
             ensure(
@@ -138,7 +169,9 @@ def validate_paper_bundle(
                 "rendered main.tex should replace the template reviewer placeholder",
             )
 
-            actual_question_ids = [question["question_id"] for question in item["questions"]]
+            actual_question_ids = [
+                question["question_id"] for question in item["questions"]
+            ]
             ensure(
                 actual_question_ids == expected["question_ids"],
                 "paper bundle question order should preserve the paper order",
@@ -157,8 +190,8 @@ def validate_paper_bundle(
                     "uploaded real questions should keep main.tex as source path",
                 )
                 ensure(
-                    question["metadata"]["category"] == "T",
-                    "real paper bundle questions should stay in theory category",
+                    question["metadata"]["category"] == expected_category,
+                    "real paper bundle questions should keep the expected category",
                 )
 
             ensure(
@@ -166,7 +199,10 @@ def validate_paper_bundle(
                 "paper bundle merged asset count should match all paper question assets",
             )
             for asset in item["assets"]:
-                ensure(asset["zip_path"] in names, "rendered asset path should exist in bundle")
+                ensure(
+                    asset["zip_path"] in names,
+                    "rendered asset path should exist in bundle",
+                )
                 ensure(
                     asset["zip_path"].startswith(f"{item['directory']}/assets/"),
                     "rendered assets should live under the merged assets directory",
