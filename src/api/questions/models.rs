@@ -3,7 +3,9 @@ use std::collections::{BTreeMap, HashSet};
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::api::shared::utils::normalize_optional_bundle_description;
+use crate::api::shared::utils::{
+    normalize_bundle_description, normalize_optional_bundle_description,
+};
 
 pub(crate) const QUESTION_CATEGORIES: [&str; 3] = ["none", "T", "E"];
 pub(crate) const QUESTION_STATUSES: [&str; 3] = ["none", "reviewed", "used"];
@@ -86,6 +88,15 @@ pub(crate) struct QuestionsParams {
     pub(crate) offset: Option<i64>,
 }
 
+#[derive(Debug)]
+pub(crate) struct CreateQuestionRequest {
+    pub(crate) description: String,
+    pub(crate) category: Option<String>,
+    pub(crate) tags: Option<Vec<String>>,
+    pub(crate) status: Option<String>,
+    pub(crate) difficulty: QuestionDifficulty,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateQuestionMetadataRequest {
@@ -117,6 +128,15 @@ pub(crate) struct NormalizedQuestionDifficultyValue {
 }
 
 pub(crate) type NormalizedQuestionDifficulty = BTreeMap<String, NormalizedQuestionDifficultyValue>;
+
+#[derive(Debug)]
+pub(crate) struct NormalizedCreateQuestionRequest {
+    pub(crate) description: String,
+    pub(crate) category: String,
+    pub(crate) tags: Vec<String>,
+    pub(crate) status: String,
+    pub(crate) difficulty: NormalizedQuestionDifficulty,
+}
 
 #[derive(Debug, Serialize)]
 pub(crate) struct QuestionImportResponse {
@@ -153,6 +173,36 @@ pub(crate) fn validate_question_status(status: &str) -> Result<()> {
         bail!("status must be one of: none, reviewed, used");
     }
     Ok(())
+}
+
+impl CreateQuestionRequest {
+    pub(crate) fn normalize(self) -> Result<NormalizedCreateQuestionRequest> {
+        let description = normalize_required_plaintext_value("description", &self.description)?;
+        let category = self
+            .category
+            .map(|value| normalize_category(&value))
+            .transpose()?
+            .unwrap_or_else(|| "none".to_string());
+        let tags = self
+            .tags
+            .map(normalize_tags)
+            .transpose()?
+            .unwrap_or_default();
+        let status = self
+            .status
+            .map(|value| normalize_status(&value))
+            .transpose()?
+            .unwrap_or_else(|| "none".to_string());
+        let difficulty = self.difficulty.normalize()?;
+
+        Ok(NormalizedCreateQuestionRequest {
+            description,
+            category,
+            tags,
+            status,
+            difficulty,
+        })
+    }
 }
 
 impl UpdateQuestionMetadataRequest {
@@ -218,6 +268,10 @@ fn normalize_required_plaintext(field: &str, value: Option<String>) -> Result<St
     normalize_optional_bundle_description(field, value)
 }
 
+fn normalize_required_plaintext_value(field: &str, value: &str) -> Result<String> {
+    normalize_bundle_description(field, value)
+}
+
 fn normalize_optional_plaintext(value: String) -> Option<String> {
     let trimmed = value.trim().to_string();
     if trimmed.is_empty() {
@@ -281,7 +335,75 @@ fn normalize_difficulty_entries(
 
 #[cfg(test)]
 mod tests {
-    use super::UpdateQuestionMetadataRequest;
+    use super::{CreateQuestionRequest, QuestionDifficulty, UpdateQuestionMetadataRequest};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn create_request_supports_full_metadata_with_defaults() {
+        let request = CreateQuestionRequest {
+            description: "  demo note  ".into(),
+            category: Some(" T ".into()),
+            tags: Some(vec![" optics ".into(), "mechanics".into(), "optics".into()]),
+            status: Some(" reviewed ".into()),
+            difficulty: QuestionDifficulty {
+                entries: BTreeMap::from([
+                    (
+                        " human ".into(),
+                        super::QuestionDifficultyValue {
+                            score: 7,
+                            notes: Some("  calibrated  ".into()),
+                        },
+                    ),
+                    (
+                        "heuristic".into(),
+                        super::QuestionDifficultyValue {
+                            score: 5,
+                            notes: Some("   ".into()),
+                        },
+                    ),
+                ]),
+            },
+        };
+
+        let normalized = request.normalize().expect("request should normalize");
+        assert_eq!(normalized.description, "demo note");
+        assert_eq!(normalized.category, "T");
+        assert_eq!(
+            normalized.tags,
+            vec!["optics".to_string(), "mechanics".to_string()]
+        );
+        assert_eq!(normalized.status, "reviewed");
+        assert_eq!(normalized.difficulty["human"].score, 7);
+        assert_eq!(
+            normalized.difficulty["human"].notes.as_deref(),
+            Some("calibrated")
+        );
+        assert_eq!(normalized.difficulty["heuristic"].notes, None);
+    }
+
+    #[test]
+    fn create_request_defaults_optional_metadata() {
+        let request = CreateQuestionRequest {
+            description: "demo note".into(),
+            category: None,
+            tags: None,
+            status: None,
+            difficulty: QuestionDifficulty {
+                entries: BTreeMap::from([(
+                    "human".into(),
+                    super::QuestionDifficultyValue {
+                        score: 5,
+                        notes: None,
+                    },
+                )]),
+            },
+        };
+
+        let normalized = request.normalize().expect("request should normalize");
+        assert_eq!(normalized.category, "none");
+        assert!(normalized.tags.is_empty());
+        assert_eq!(normalized.status, "none");
+    }
 
     #[test]
     fn update_request_normalizes_and_deduplicates_tags() {

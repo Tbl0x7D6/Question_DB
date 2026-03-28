@@ -16,15 +16,22 @@
   - 传 JSON 字符串
   - 必须至少包含 `human`
   - 每个 tag 的值形如 `{ "score": 7, "notes": "sample" }`
+- 可选字段：`category`
+  - `none` | `T` | `E`
+- 可选字段：`tags`
+  - 传 JSON 字符串数组
+  - 会去重；`[]` 表示创建时无标签
+- 可选字段：`status`
+  - `none` | `reviewed` | `used`
 - 大小限制：20 MiB
 - zip 根目录必须包含且只包含：
   - 恰好一个 `.tex` 文件
   - 恰好一个 `assets/` 目录
-- 上传时自动写入默认 metadata：
+- 如果未传可选 metadata，则默认：
   - `category = "none"`
   - `tags = []`
   - `status = "none"`
-  - `created_at = NOW()`
+- `created_at = NOW()`
 
 成功响应：
 

@@ -34,6 +34,27 @@ def assert_question_query(
     session.validation_notes.append(f"{label} -> {actual_ids}")
 
 
+def build_question_create_fields(
+    *,
+    description: str,
+    difficulty: dict,
+    category: str | None = None,
+    tags: list[str] | None = None,
+    status: str | None = None,
+) -> dict[str, str]:
+    fields = {
+        "description": description,
+        "difficulty": json.dumps(difficulty, ensure_ascii=False),
+    }
+    if category is not None:
+        fields["category"] = category
+    if tags is not None:
+        fields["tags"] = json.dumps(tags, ensure_ascii=False)
+    if status is not None:
+        fields["status"] = status
+    return fields
+
+
 def upload_and_patch_synthetic_questions(
     session: TestSession,
     zip_paths: list,
@@ -64,11 +85,37 @@ def upload_and_patch_synthetic_questions(
         "POST /questions invalid description",
         400,
         path="/questions",
+        text_fields=build_question_create_fields(
+            description="bad/name",
+            difficulty=QUESTION_SPECS[0]["create_difficulty"],
+        ),
+        field_name="file",
+        file_path=zip_paths[0],
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /questions invalid category",
+        400,
+        path="/questions",
+        text_fields=build_question_create_fields(
+            description=QUESTION_SPECS[0]["create_description"],
+            category="X",
+            difficulty=QUESTION_SPECS[0]["create_difficulty"],
+        ),
+        field_name="file",
+        file_path=zip_paths[0],
+        content_type="application/zip",
+    )
+    session.multipart_request(
+        "POST /questions invalid tags json",
+        400,
+        path="/questions",
         text_fields={
-            "description": "bad/name",
+            "description": QUESTION_SPECS[0]["create_description"],
             "difficulty": json.dumps(
                 QUESTION_SPECS[0]["create_difficulty"], ensure_ascii=False
             ),
+            "tags": '"not-an-array"',
         },
         field_name="file",
         file_path=zip_paths[0],
@@ -78,10 +125,10 @@ def upload_and_patch_synthetic_questions(
         "POST /questions invalid difficulty missing human",
         400,
         path="/questions",
-        text_fields={
-            "description": QUESTION_SPECS[0]["create_description"],
-            "difficulty": json.dumps({"heuristic": {"score": 5}}, ensure_ascii=False),
-        },
+        text_fields=build_question_create_fields(
+            description=QUESTION_SPECS[0]["create_description"],
+            difficulty={"heuristic": {"score": 5}},
+        ),
         field_name="file",
         file_path=zip_paths[0],
         content_type="application/zip",
@@ -90,10 +137,10 @@ def upload_and_patch_synthetic_questions(
         "POST /questions invalid difficulty score",
         400,
         path="/questions",
-        text_fields={
-            "description": QUESTION_SPECS[0]["create_description"],
-            "difficulty": json.dumps({"human": {"score": 11}}, ensure_ascii=False),
-        },
+        text_fields=build_question_create_fields(
+            description=QUESTION_SPECS[0]["create_description"],
+            difficulty={"human": {"score": 11}},
+        ),
         field_name="file",
         file_path=zip_paths[0],
         content_type="application/zip",
@@ -104,10 +151,13 @@ def upload_and_patch_synthetic_questions(
             f"POST /questions ({spec['slug']})",
             200,
             path="/questions",
-            text_fields={
-                "description": spec["create_description"],
-                "difficulty": json.dumps(spec["create_difficulty"], ensure_ascii=False),
-            },
+            text_fields=build_question_create_fields(
+                description=spec["patch"]["description"],
+                category=spec["patch"]["category"],
+                tags=spec["patch"]["tags"],
+                status=spec["patch"]["status"],
+                difficulty=spec["patch"]["difficulty"],
+            ),
             field_name="file",
             file_path=zip_path,
             content_type="application/zip",
@@ -124,15 +174,32 @@ def upload_and_patch_synthetic_questions(
         f"Created synthetic question ids: {question_by_slug}."
     )
 
-    for spec in QUESTION_SPECS:
-        question_id = question_by_slug[spec["slug"]]
-        session.json_request(
-            f"PATCH /questions/{question_id}",
-            200,
-            method="PATCH",
-            path=f"/questions/{question_id}",
-            payload=spec["patch"],
-        )
+    session.json_request(
+        "PATCH /questions empty body",
+        400,
+        method="PATCH",
+        path=f"/questions/{question_by_slug['mechanics']}",
+        payload={},
+    )
+    _, body, _ = session.json_request(
+        f"PATCH /questions/{question_by_slug['thermal']} clear tags",
+        200,
+        method="PATCH",
+        path=f"/questions/{question_by_slug['thermal']}",
+        payload={
+            "tags": [],
+            "difficulty": {
+                "human": {"score": 5, "notes": ""},
+                "heuristic": {"score": 4, "notes": "direct model"},
+                "simulator": {"score": 6},
+            },
+        },
+    )
+    thermal_detail = parse_json(body)
+    session.ensure(
+        thermal_detail["tags"] == [],
+        "question metadata patch should allow clearing tags",
+    )
 
     session.json_request(
         f"PATCH /questions/{question_by_slug['mechanics']} invalid difficulty",
@@ -432,10 +499,13 @@ def upload_real_questions(
             f"POST /questions ({fixture.slug})",
             200,
             path="/questions",
-            text_fields={
-                "description": fixture.create_description,
-                "difficulty": json.dumps(fixture.create_difficulty, ensure_ascii=False),
-            },
+            text_fields=build_question_create_fields(
+                description=fixture.patch["description"],
+                category=fixture.patch["category"],
+                tags=fixture.patch["tags"],
+                status=fixture.patch["status"],
+                difficulty=fixture.patch["difficulty"],
+            ),
             field_name="file",
             file_path=fixture.upload_path,
             content_type="application/zip",
@@ -452,14 +522,6 @@ def upload_real_questions(
         )
         question_ids.append(question_id)
         question_by_slug[fixture.slug] = question_id
-
-        session.json_request(
-            f"PATCH /questions/{question_id} ({fixture.slug})",
-            200,
-            method="PATCH",
-            path=f"/questions/{question_id}",
-            payload=fixture.patch,
-        )
 
     first_id = question_ids[0]
     _, body, _ = session.perform_request(

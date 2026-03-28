@@ -78,9 +78,13 @@ question.zip
 - tex 和 `assets/` 下的资源文件都会写入 `objects` 表
 - 上传题目时必须额外提供一个非空的 `description`
 - 上传题目时必须额外提供一个 `difficulty` JSON 字符串，且至少包含 `human`
+- 上传题目时也可以一次性提供完整 metadata：
+  - `category` 可选，取值 `none`、`T`、`E`
+  - `tags` 可选，传 JSON 字符串数组
+  - `status` 可选，取值 `none`、`reviewed`、`used`
 - `description` 支持中文，并可直接参与 `GET /questions?q=...` 的模糊匹配
 - `description` 会参与 bundle 目录命名，因此不能包含 `/ \\ : * ? " < > |`，不能是 `.`、`..`，也不能以 `.` 结尾
-- 题目 metadata 在上传时其余字段使用默认值：
+- 如果未提供可选 metadata，上传时其余字段使用默认值：
   - `category = "none"`
   - `tags = []`
   - `status = "none"`
@@ -97,6 +101,9 @@ question.zip
 ```bash
 curl -X POST http://127.0.0.1:8080/questions \
   -F "description=热学标定题" \
+  -F "category=T" \
+  -F 'tags=["thermal","calibration"]' \
+  -F "status=reviewed" \
   -F 'difficulty={"human":{"score":5,"notes":"baseline"}}' \
   -F "file=@question.zip"
 ```
@@ -128,6 +135,7 @@ curl -X POST http://127.0.0.1:8080/questions \
 说明：
 
 - 请求体支持部分更新
+- 推荐在 `POST /questions` 时就提交完整 metadata；`PATCH` 主要用于后续修正 metadata
 - `description` 如果出现在更新请求里，必须是非空字符串，并满足上面的文件名安全限制
 - `tags` 传空数组会清空
 - `difficulty` 如果出现在更新请求里，会整体替换整组 difficulty tag
