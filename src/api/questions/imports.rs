@@ -105,11 +105,13 @@ pub(crate) async fn replace_question_zip(
         .await
         .context("begin question file replace tx failed")?;
 
-    let exists = query("SELECT 1 FROM questions WHERE question_id = $1::uuid")
+    // Lock the parent row before rebuilding child rows so file replacement
+    // cannot race metadata updates or deletion of the same question.
+    let exists = query("SELECT 1 FROM questions WHERE question_id = $1::uuid FOR UPDATE")
         .bind(question_id)
         .fetch_optional(&mut *tx)
         .await
-        .context("check question existence failed")?
+        .context("lock question row for file replace failed")?
         .is_some();
     if !exists {
         bail!("question not found: {question_id}");

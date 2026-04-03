@@ -136,6 +136,7 @@ curl -X POST http://127.0.0.1:8080/questions \
 
 - 请求体支持部分更新
 - 推荐在 `POST /questions` 时就提交完整 metadata；`PATCH` 主要用于后续修正 metadata
+- 服务端会先锁定目标题目的主记录；同一题目的 metadata 更新、文件替换和删除会串行执行，避免并发重建 `tags` / `difficulty` 时出现竞态
 - `description` 如果出现在更新请求里，必须是非空字符串，并满足上面的文件名安全限制
 - `tags` 传空数组会清空
 - `difficulty` 如果出现在更新请求里，会整体替换整组 difficulty tag

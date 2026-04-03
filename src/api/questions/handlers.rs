@@ -182,11 +182,13 @@ pub(crate) async fn update_question_metadata(
         .await
         .context("begin question metadata update tx failed")?;
 
-    let exists = query("SELECT 1 FROM questions WHERE question_id = $1::uuid")
+    // Lock the parent row up front so concurrent writers on the same question
+    // serialize even when child-table replacement starts from an empty set.
+    let exists = query("SELECT 1 FROM questions WHERE question_id = $1::uuid FOR UPDATE")
         .bind(&question_id)
         .fetch_optional(&mut *tx)
         .await
-        .context("check question existence failed")?
+        .context("lock question row for metadata update failed")?
         .is_some();
     if !exists {
         return Err(ApiError {

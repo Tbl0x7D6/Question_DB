@@ -48,6 +48,8 @@
 
 使用 JSON 请求体更新题目的 metadata，支持部分更新。
 
+- 服务端会先锁定目标题目的主记录；同一题目的 metadata 更新、文件替换和删除会串行执行，避免并发重建 `tags` / `difficulty` 时出现竞态
+
 支持字段：
 
 - `category`: `none` | `T` | `E`
