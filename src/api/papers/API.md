@@ -37,6 +37,10 @@ curl -X POST http://127.0.0.1:8080/papers \
 
 按条件分页查询试卷，搜索也统一走这个接口。
 
+说明：
+
+- 只返回未软删除试卷
+
 支持的 query 参数：
 
 - `question_id`
@@ -50,6 +54,10 @@ curl -X POST http://127.0.0.1:8080/papers \
 ### `GET /papers/{paper_id}`
 
 返回试卷详情和按顺序展开后的题目摘要。
+
+说明：
+
+- 只返回未软删除试卷
 
 ### `PATCH /papers/{paper_id}`
 
@@ -73,6 +81,7 @@ curl -X POST http://127.0.0.1:8080/papers \
 - 更新请求会校验试卷更新后的整套题目：
   - `category` 必须全部同为 `T` 或全部同为 `E`
   - 每道题的 `status` 必须是 `reviewed` 或 `used`
+- 已软删除试卷会被视为不存在，返回 `404`
 
 成功时返回更新后的完整试卷详情。
 
@@ -88,6 +97,7 @@ curl -X POST http://127.0.0.1:8080/papers \
   - 更新 `append_object_id`
   - 删除旧的 appendix object
   - 更新 `updated_at`
+- 已软删除试卷会被视为不存在，返回 `404`
 
 成功响应：
 
@@ -101,7 +111,13 @@ curl -X POST http://127.0.0.1:8080/papers \
 
 ### `DELETE /papers/{paper_id}`
 
-删除试卷。
+软删除试卷。
+
+语义：
+
+- 只会更新 `deleted_at` / `deleted_by` / `updated_at`
+- 不会立刻删除 appendix binary；最终清理由管理员垃圾回收接口处理
+- 已软删除试卷会被视为不存在，重复删除返回 `404`
 
 成功响应：
 
@@ -137,3 +153,4 @@ curl -X POST http://127.0.0.1:8080/papers \
 - 题目会按试卷中的顺序依次注入 `main.tex`
 - 每道题原始 tex 中的 `\includegraphics` 资源引用会被改写到合并后的 `assets/` 目录
 - 每道题内部的 `\label` / `\ref` / `\eqref` 等标签会按 `p1-`、`p2-` 这样的前缀重写，避免跨题冲突
+- 已软删除试卷不能通过这个接口下载

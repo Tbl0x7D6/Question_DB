@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use sqlx::{query, Postgres, QueryBuilder, Row};
+use sqlx::{query, Row};
 use uuid::Uuid;
 
 use super::{
@@ -15,13 +15,16 @@ use super::{
         CreatePaperRequest, PaperDeleteResponse, PaperDetail, PaperFileReplaceResponse,
         PaperImportResponse, PapersParams, UpdatePaperRequest,
     },
-    queries::{execute_papers_query, validate_and_build_papers_query},
+    queries::{
+        ensure_paper_questions_valid, execute_papers_query, validate_and_build_papers_query,
+    },
 };
 use crate::api::{
-    questions::queries::{
-        load_question_tags, map_paper_detail, map_paper_question_summary, map_paper_summary,
+    questions::queries::map_paper_summary,
+    shared::{
+        details::{load_paper_detail, DetailVisibility},
+        error::{ApiError, ApiResult},
     },
-    shared::error::{ApiError, ApiResult},
     AppState,
 };
 
@@ -198,17 +201,15 @@ pub(crate) async fn update_paper(
         .begin()
         .await
         .context("begin paper update tx failed")?;
-    let exists = query("SELECT 1 FROM papers WHERE paper_id = $1::uuid")
-        .bind(&paper_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .context("check paper existence failed")?
-        .is_some();
+    let exists =
+        query("SELECT 1 FROM papers WHERE paper_id = $1::uuid AND deleted_at IS NULL FOR UPDATE")
+            .bind(&paper_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("check paper existence failed")?
+            .is_some();
     if !exists {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("paper not found: {paper_id}"),
-        });
+        return Err(ApiError::not_found(format!("paper not found: {paper_id}")));
     }
 
     let final_question_ids = if let Some(question_ids) = &update.question_ids {
@@ -317,18 +318,32 @@ pub(crate) async fn delete_paper(
     Uuid::parse_str(&paper_id)
         .map_err(|_| ApiError::bad_request(format!("invalid paper_id: {paper_id}")))?;
 
-    let result = query("DELETE FROM papers WHERE paper_id = $1::uuid")
-        .bind(&paper_id)
-        .execute(&state.pool)
+    let mut tx = state
+        .pool
+        .begin()
         .await
-        .context("delete paper failed")?;
+        .context("begin paper delete tx failed")?;
 
-    if result.rows_affected() == 0 {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("paper not found: {paper_id}"),
-        });
+    let exists =
+        query("SELECT 1 FROM papers WHERE paper_id = $1::uuid AND deleted_at IS NULL FOR UPDATE")
+            .bind(&paper_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("lock paper row for delete failed")?
+            .is_some();
+    if !exists {
+        return Err(ApiError::not_found(format!("paper not found: {paper_id}")));
     }
+
+    query(
+        "UPDATE papers SET deleted_at = NOW(), deleted_by = NULL, updated_at = NOW() WHERE paper_id = $1::uuid",
+    )
+    .bind(&paper_id)
+    .execute(&mut *tx)
+    .await
+    .context("soft delete paper failed")?;
+
+    tx.commit().await.context("commit paper delete failed")?;
 
     Ok(Json(PaperDeleteResponse {
         paper_id,
@@ -348,51 +363,22 @@ pub(crate) async fn get_paper_detail(
 }
 
 async fn fetch_paper_detail(state: &AppState, paper_id: &str) -> Result<PaperDetail, ApiError> {
-    let paper_row = query(
-        r#"
-        SELECT paper_id::text AS paper_id, description, title, subtitle, authors, reviewers,
-               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
-               to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
-        FROM papers
-        WHERE paper_id = $1::uuid
-        "#,
+    load_paper_detail(
+        &state.pool,
+        paper_id,
+        DetailVisibility::ActiveOnly,
+        DetailVisibility::ActiveOnly,
     )
-    .bind(paper_id)
-    .fetch_optional(&state.pool)
     .await
-    .context("load paper detail failed")
-    .map_err(ApiError::from)?
-    .ok_or_else(|| ApiError {
-        status: StatusCode::NOT_FOUND,
-        message: format!("paper not found: {paper_id}"),
-    })?;
-
-    let question_rows = query(
-        r#"
-        SELECT q.question_id::text AS question_id, pq.sort_order, q.category, q.status
-        FROM paper_questions pq
-        JOIN questions q ON q.question_id = pq.question_id
-        WHERE pq.paper_id = $1::uuid
-        ORDER BY pq.sort_order
-        "#,
-    )
-    .bind(paper_id)
-    .fetch_all(&state.pool)
-    .await
-    .context("load paper questions failed")
-    .map_err(ApiError::from)?;
-
-    let mut questions = Vec::with_capacity(question_rows.len());
-    for row in question_rows {
-        let question_id: String = row.get("question_id");
-        let tags = load_question_tags(&state.pool, &question_id)
-            .await
-            .context("load paper question tags failed")
-            .map_err(ApiError::from)?;
-        questions.push(map_paper_question_summary(row, tags));
-    }
-
-    Ok(map_paper_detail(paper_row, questions))
+    .map(|loaded| loaded.detail)
+    .map_err(|err| {
+        let message = err.to_string();
+        if message.starts_with("paper not found:") {
+            ApiError::not_found(message)
+        } else {
+            ApiError::from(err)
+        }
+    })
 }
 
 async fn read_text_field(
@@ -427,115 +413,6 @@ fn validate_question_ids(question_ids: &[String]) -> Result<(), ApiError> {
     }
     Ok(())
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PaperQuestionValidationRow {
-    question_id: String,
-    category: String,
-    status: String,
-}
-
-async fn ensure_paper_questions_valid<'e, E>(
-    executor: E,
-    question_ids: &[String],
-) -> Result<(), ApiError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let question_rows = load_paper_question_validation_rows(executor, question_ids).await?;
-    validate_paper_question_rows(&question_rows)
-}
-
-async fn load_paper_question_validation_rows<'e, E>(
-    executor: E,
-    question_ids: &[String],
-) -> Result<Vec<PaperQuestionValidationRow>, ApiError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    if question_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut builder = QueryBuilder::<Postgres>::new(
-        "SELECT q.question_id::text AS question_id, q.category, q.status FROM questions q WHERE q.question_id IN (",
-    );
-    for (idx, question_id) in question_ids.iter().enumerate() {
-        if idx > 0 {
-            builder.push(", ");
-        }
-        builder.push_bind(question_id).push("::uuid");
-    }
-    builder.push(')');
-
-    let question_rows = builder
-        .build()
-        .fetch_all(executor)
-        .await
-        .context("load questions for paper validation failed")
-        .map_err(ApiError::from)?
-        .into_iter()
-        .map(|row| PaperQuestionValidationRow {
-            question_id: row.get("question_id"),
-            category: row.get("category"),
-            status: row.get("status"),
-        })
-        .collect::<Vec<_>>();
-
-    let existing_question_ids = question_rows
-        .iter()
-        .map(|row| row.question_id.as_str())
-        .collect::<HashSet<_>>();
-
-    for question_id in question_ids {
-        if !existing_question_ids.contains(question_id.as_str()) {
-            return Err(ApiError::bad_request(format!(
-                "unknown question_id in question_ids: {question_id}"
-            )));
-        }
-    }
-
-    Ok(question_rows)
-}
-
-fn validate_paper_question_rows(
-    question_rows: &[PaperQuestionValidationRow],
-) -> Result<(), ApiError> {
-    let mut expected_category = None;
-
-    for row in question_rows {
-        match row.category.as_str() {
-            "T" | "E" => {}
-            other => {
-                return Err(ApiError::bad_request(format!(
-                    "question {} has category {other}; paper questions must all have category T or all have category E",
-                    row.question_id
-                )));
-            }
-        }
-
-        if let Some(expected) = expected_category {
-            if expected != row.category {
-                return Err(ApiError::bad_request(format!(
-                    "paper questions must all have the same category; found both {expected} and {}",
-                    row.category
-                )));
-            }
-        } else {
-            expected_category = Some(row.category.as_str());
-        }
-
-        if !matches!(row.status.as_str(), "reviewed" | "used") {
-            return Err(ApiError::bad_request(format!(
-                "question {} has status {}; paper questions must all have status reviewed or used",
-                row.question_id, row.status
-            )));
-        }
-    }
-
-    Ok(())
-}
-
 fn map_paper_detail_error(err: ApiError) -> ApiError {
     if err.status == StatusCode::NOT_FOUND || err.status == StatusCode::BAD_REQUEST {
         err
@@ -577,56 +454,5 @@ fn map_paper_file_replace_error(err: anyhow::Error) -> ApiError {
         ApiError::bad_request(message)
     } else {
         ApiError::from(err)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{validate_paper_question_rows, PaperQuestionValidationRow};
-
-    fn row(question_id: &str, category: &str, status: &str) -> PaperQuestionValidationRow {
-        PaperQuestionValidationRow {
-            question_id: question_id.to_string(),
-            category: category.to_string(),
-            status: status.to_string(),
-        }
-    }
-
-    #[test]
-    fn paper_question_validation_accepts_uniform_category_with_reviewed_or_used_status() {
-        let rows = vec![row("q1", "T", "reviewed"), row("q2", "T", "used")];
-
-        validate_paper_question_rows(&rows).expect("paper questions should validate");
-    }
-
-    #[test]
-    fn paper_question_validation_rejects_none_category() {
-        let err = validate_paper_question_rows(&[row("q1", "none", "reviewed")])
-            .expect_err("none category should be rejected");
-
-        assert!(err
-            .message
-            .contains("paper questions must all have category T or all have category E"));
-    }
-
-    #[test]
-    fn paper_question_validation_rejects_mixed_categories() {
-        let err =
-            validate_paper_question_rows(&[row("q1", "T", "reviewed"), row("q2", "E", "used")])
-                .expect_err("mixed categories should be rejected");
-
-        assert!(err
-            .message
-            .contains("paper questions must all have the same category"));
-    }
-
-    #[test]
-    fn paper_question_validation_rejects_none_status() {
-        let err = validate_paper_question_rows(&[row("q1", "E", "none")])
-            .expect_err("none status should be rejected");
-
-        assert!(err
-            .message
-            .contains("paper questions must all have status reviewed or used"));
     }
 }

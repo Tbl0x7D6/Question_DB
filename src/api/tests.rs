@@ -23,12 +23,17 @@ mod tests {
         assert_eq!(query.limit, 100);
         assert_eq!(query.offset, 0);
         assert_eq!(query.bind_count, count_question_binds(&params));
+        assert!(query.sql.contains("WHERE q.deleted_at IS NULL"));
         assert!(query.sql.contains("FROM question_tags qt"));
         assert!(query.sql.contains("FROM question_difficulties qd"));
         assert!(query.sql.contains("qd.algorithm_tag = "));
         assert!(query.sql.contains("qd.score >= "));
         assert!(query.sql.contains("qd.score <= "));
         assert!(query.sql.contains("FROM paper_questions pq"));
+        assert!(query
+            .sql
+            .contains("JOIN papers p ON p.paper_id = pq.paper_id"));
+        assert!(query.sql.contains("p.deleted_at IS NULL"));
         assert!(query.sql.contains("COALESCE(q.description, '') ILIKE"));
         assert!(!query.sql.contains("q.question_id::text ILIKE"));
         assert!(!query.sql.contains("q.source_tex_path, '') ILIKE"));
@@ -49,7 +54,9 @@ mod tests {
         assert_eq!(query.limit, 100);
         assert_eq!(query.offset, 0);
         assert_eq!(query.bind_count, count_paper_binds(&params));
+        assert!(query.sql.contains("WHERE p.deleted_at IS NULL"));
         assert!(query.sql.contains("FROM paper_questions pq"));
+        assert!(query.sql.contains("q.deleted_at IS NULL"));
         assert!(query.sql.contains("JOIN question_tags qt"));
         assert!(query
             .sql

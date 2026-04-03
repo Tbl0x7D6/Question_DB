@@ -64,6 +64,7 @@ pub(crate) async fn export_jsonl(
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM questions
+        WHERE deleted_at IS NULL
         ORDER BY created_at DESC, question_id
         "#,
     )
@@ -133,6 +134,7 @@ pub(crate) async fn export_csv(
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM questions
+        WHERE deleted_at IS NULL
         ORDER BY created_at DESC, question_id
         "#,
     )

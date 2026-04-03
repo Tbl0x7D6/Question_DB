@@ -1,5 +1,6 @@
 //! HTTP API composition for the question bank service.
 
+mod admin;
 mod ops;
 mod papers;
 mod questions;
@@ -23,6 +24,7 @@ pub struct AppState {
 /// Build the complete Axum router for the service.
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .merge(admin::router())
         .merge(system::router())
         .merge(papers::router())
         .merge(questions::router())

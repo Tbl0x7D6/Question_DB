@@ -345,7 +345,7 @@ async fn load_question_bundle_data(pool: &PgPool, question_id: &str) -> Result<Q
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM questions
-        WHERE question_id = $1::uuid
+        WHERE question_id = $1::uuid AND deleted_at IS NULL
         "#,
     )
     .bind(question_id)
@@ -376,7 +376,7 @@ async fn load_question_bundle_data(pool: &PgPool, question_id: &str) -> Result<Q
         SELECT p.paper_id::text AS paper_id, p.description, p.title, p.subtitle, pq.sort_order
         FROM paper_questions pq
         JOIN papers p ON p.paper_id = pq.paper_id
-        WHERE pq.question_id = $1::uuid
+        WHERE pq.question_id = $1::uuid AND p.deleted_at IS NULL
         ORDER BY p.created_at DESC, pq.sort_order
         "#,
     )
@@ -413,7 +413,7 @@ async fn load_paper_bundle_data(pool: &PgPool, paper_id: &str) -> Result<PaperBu
                to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM papers p
         JOIN objects o ON o.object_id = p.append_object_id
-        WHERE p.paper_id = $1::uuid
+        WHERE p.paper_id = $1::uuid AND p.deleted_at IS NULL
         "#,
     )
     .bind(paper_id)
@@ -427,7 +427,7 @@ async fn load_paper_bundle_data(pool: &PgPool, paper_id: &str) -> Result<PaperBu
         SELECT q.question_id::text AS question_id, pq.sort_order, q.category, q.status
         FROM paper_questions pq
         JOIN questions q ON q.question_id = pq.question_id
-        WHERE pq.paper_id = $1::uuid
+        WHERE pq.paper_id = $1::uuid AND q.deleted_at IS NULL
         ORDER BY pq.sort_order
         "#,
     )

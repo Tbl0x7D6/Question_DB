@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use axum::{
     extract::{Multipart, Path as AxumPath, Query, State},
     http::StatusCode,
@@ -11,17 +11,19 @@ use super::{
     imports::{import_question_zip, replace_question_zip, MAX_UPLOAD_BYTES},
     models::{
         CreateQuestionRequest, QuestionDeleteResponse, QuestionDetail, QuestionDifficulty,
-        QuestionFileReplaceResponse, QuestionImportResponse, QuestionPaperRef, QuestionSummary,
-        QuestionsParams, UpdateQuestionMetadataRequest,
+        QuestionFileReplaceResponse, QuestionImportResponse, QuestionSummary, QuestionsParams,
+        UpdateQuestionMetadataRequest,
     },
     queries::{
-        execute_questions_query, load_question_difficulties, load_question_files,
-        load_question_tags, map_question_detail, map_question_paper_ref, map_question_summary,
-        validate_question_filters,
+        execute_questions_query, load_question_difficulties, load_question_tags,
+        map_question_summary, validate_question_filters,
     },
 };
 use crate::api::{
-    shared::error::{ApiError, ApiResult},
+    shared::{
+        details::{load_question_detail, DetailVisibility},
+        error::{ApiError, ApiResult},
+    },
     AppState,
 };
 
@@ -184,17 +186,18 @@ pub(crate) async fn update_question_metadata(
 
     // Lock the parent row up front so concurrent writers on the same question
     // serialize even when child-table replacement starts from an empty set.
-    let exists = query("SELECT 1 FROM questions WHERE question_id = $1::uuid FOR UPDATE")
-        .bind(&question_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .context("lock question row for metadata update failed")?
-        .is_some();
+    let exists = query(
+        "SELECT 1 FROM questions WHERE question_id = $1::uuid AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(&question_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("lock question row for metadata update failed")?
+    .is_some();
     if !exists {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("question not found: {question_id}"),
-        });
+        return Err(ApiError::not_found(format!(
+            "question not found: {question_id}"
+        )));
     }
 
     if let Some(category) = &update.category {
@@ -299,18 +302,55 @@ pub(crate) async fn delete_question(
     Uuid::parse_str(&question_id)
         .map_err(|_| ApiError::bad_request(format!("invalid question_id: {question_id}")))?;
 
-    let result = query("DELETE FROM questions WHERE question_id = $1::uuid")
-        .bind(&question_id)
-        .execute(&state.pool)
+    let mut tx = state
+        .pool
+        .begin()
         .await
-        .context("delete question failed")?;
+        .context("begin question delete tx failed")?;
 
-    if result.rows_affected() == 0 {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("question not found: {question_id}"),
-        });
+    let exists = query(
+        "SELECT 1 FROM questions WHERE question_id = $1::uuid AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(&question_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("lock question row for delete failed")?
+    .is_some();
+    if !exists {
+        return Err(ApiError::not_found(format!(
+            "question not found: {question_id}"
+        )));
     }
+
+    let active_paper_ref = query(
+        r#"
+        SELECT p.paper_id::text AS paper_id
+        FROM paper_questions pq
+        JOIN papers p ON p.paper_id = pq.paper_id
+        WHERE pq.question_id = $1::uuid AND p.deleted_at IS NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(&question_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("check active paper references before question delete failed")?;
+    if let Some(row) = active_paper_ref {
+        let paper_id: String = row.get("paper_id");
+        return Err(ApiError::conflict(format!(
+            "question {question_id} is still referenced by active paper {paper_id}"
+        )));
+    }
+
+    query(
+        "UPDATE questions SET deleted_at = NOW(), deleted_by = NULL, updated_at = NOW() WHERE question_id = $1::uuid",
+    )
+    .bind(&question_id)
+    .execute(&mut *tx)
+    .await
+    .context("soft delete question failed")?;
+
+    tx.commit().await.context("commit question delete failed")?;
 
     Ok(Json(QuestionDeleteResponse {
         question_id,
@@ -322,64 +362,14 @@ async fn fetch_question_detail(
     state: &AppState,
     question_id: &str,
 ) -> Result<QuestionDetail, anyhow::Error> {
-    let row = query(
-        r#"
-        SELECT question_id::text AS question_id, source_tex_path, category, status,
-               COALESCE(description, '') AS description,
-               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
-               to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
-        FROM questions
-        WHERE question_id = $1::uuid
-        "#,
+    load_question_detail(
+        &state.pool,
+        question_id,
+        DetailVisibility::ActiveOnly,
+        DetailVisibility::ActiveOnly,
     )
-    .bind(question_id)
-    .fetch_optional(&state.pool)
     .await
-    .context("load question detail failed")?
-    .ok_or_else(|| anyhow!("question not found: {question_id}"))?;
-
-    let tex_files = load_question_files(&state.pool, question_id, "tex")
-        .await
-        .context("load question tex files failed")?;
-    let tex_object_id = tex_files
-        .first()
-        .map(|file| file.object_id.clone())
-        .ok_or_else(|| anyhow!("question is missing a tex object: {question_id}"))?;
-    let assets = load_question_files(&state.pool, question_id, "asset")
-        .await
-        .context("load question assets failed")?;
-    let tags = load_question_tags(&state.pool, question_id)
-        .await
-        .context("load question tags failed")?;
-    let difficulty = load_question_difficulties(&state.pool, question_id)
-        .await
-        .context("load question difficulties failed")?;
-
-    let papers = query(
-        r#"
-        SELECT p.paper_id::text AS paper_id, p.description, p.title, p.subtitle, pq.sort_order
-        FROM paper_questions pq
-        JOIN papers p ON p.paper_id = pq.paper_id
-        WHERE pq.question_id = $1::uuid
-        ORDER BY p.created_at DESC, pq.sort_order
-        "#,
-    )
-    .bind(question_id)
-    .fetch_all(&state.pool)
-    .await
-    .context("load question papers failed")?
-    .into_iter()
-    .map(map_question_paper_ref)
-    .collect::<Vec<QuestionPaperRef>>();
-
-    Ok(map_question_detail(
-        row,
-        tex_object_id,
-        tags,
-        difficulty,
-        assets,
-        papers,
-    ))
+    .map(|loaded| loaded.detail)
 }
 
 fn map_question_detail_error(err: anyhow::Error) -> StatusCode {

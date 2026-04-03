@@ -1275,6 +1275,8 @@ def run_ops_and_cleanup(
     created_question_ids: list[str],
     synthetic_question_ids: list[str],
     expected_exported_questions: int,
+    protected_question_id: str,
+    restorable_paper_id: str,
 ) -> None:
     _, body, _ = session.json_request(
         "POST /exports/run",
@@ -1306,6 +1308,142 @@ def run_ops_and_cleanup(
         "quality report should include empty_papers",
     )
 
+    total_question_count = len(created_question_ids) + len(synthetic_question_ids)
+    expected_deleted_paper_ids = sorted(paper_ids)
+    expected_deleted_question_ids = sorted(created_question_ids + synthetic_question_ids)
+    restorable_question_id = protected_question_id
+
+    session.perform_request(
+        f"DELETE /questions/{protected_question_id} while active paper exists",
+        409,
+        method="DELETE",
+        path=f"/questions/{protected_question_id}",
+    )
+
+    session.perform_request(
+        f"DELETE /papers/{restorable_paper_id}",
+        200,
+        method="DELETE",
+        path=f"/papers/{restorable_paper_id}",
+    )
+    session.perform_request(
+        f"GET /papers/{restorable_paper_id} after soft delete",
+        404,
+        path=f"/papers/{restorable_paper_id}",
+    )
+    _, body, _ = session.perform_request(
+        f"GET /admin/papers/{restorable_paper_id}",
+        200,
+        path=f"/admin/papers/{restorable_paper_id}",
+    )
+    deleted_paper_detail = parse_json(body)
+    session.ensure(
+        deleted_paper_detail["is_deleted"],
+        "admin paper detail should expose soft-deleted papers",
+    )
+    session.ensure(
+        deleted_paper_detail["deleted_at"] is not None,
+        "admin paper detail should expose deleted_at",
+    )
+
+    _, body, _ = session.perform_request(
+        "GET /admin/papers?state=deleted after first paper delete",
+        200,
+        path="/admin/papers?state=deleted&limit=10",
+    )
+    deleted_paper_ids = sorted(item["paper_id"] for item in parse_json(body))
+    session.ensure(
+        deleted_paper_ids == [restorable_paper_id],
+        "admin deleted paper list should contain the one deleted paper",
+    )
+
+    session.perform_request(
+        f"DELETE /questions/{restorable_question_id}",
+        200,
+        method="DELETE",
+        path=f"/questions/{restorable_question_id}",
+    )
+    session.perform_request(
+        f"GET /questions/{restorable_question_id} after soft delete",
+        404,
+        path=f"/questions/{restorable_question_id}",
+    )
+    _, body, _ = session.perform_request(
+        f"GET /admin/questions/{restorable_question_id}",
+        200,
+        path=f"/admin/questions/{restorable_question_id}",
+    )
+    deleted_question_detail = parse_json(body)
+    session.ensure(
+        deleted_question_detail["is_deleted"],
+        "admin question detail should expose soft-deleted questions",
+    )
+    session.ensure(
+        deleted_question_detail["deleted_at"] is not None,
+        "admin question detail should expose deleted_at",
+    )
+
+    _, body, _ = session.perform_request(
+        "GET /admin/questions?state=deleted after first question delete",
+        200,
+        path="/admin/questions?state=deleted&limit=20",
+    )
+    deleted_question_ids = sorted(item["question_id"] for item in parse_json(body))
+    session.ensure(
+        deleted_question_ids == [restorable_question_id],
+        "admin deleted question list should contain the one deleted question",
+    )
+
+    session.perform_request(
+        f"POST /admin/papers/{restorable_paper_id}/restore while question deleted",
+        409,
+        method="POST",
+        path=f"/admin/papers/{restorable_paper_id}/restore",
+        headers={"content-type": "application/json"},
+        body=b"{}",
+        request_body={},
+    )
+
+    _, body, _ = session.perform_request(
+        f"POST /admin/questions/{restorable_question_id}/restore",
+        200,
+        method="POST",
+        path=f"/admin/questions/{restorable_question_id}/restore",
+        headers={"content-type": "application/json"},
+        body=b"{}",
+        request_body={},
+    )
+    restored_question = parse_json(body)
+    session.ensure(
+        not restored_question["is_deleted"],
+        "restored admin question detail should mark the question active",
+    )
+    session.perform_request(
+        f"GET /questions/{restorable_question_id} after restore",
+        200,
+        path=f"/questions/{restorable_question_id}",
+    )
+
+    _, body, _ = session.perform_request(
+        f"POST /admin/papers/{restorable_paper_id}/restore",
+        200,
+        method="POST",
+        path=f"/admin/papers/{restorable_paper_id}/restore",
+        headers={"content-type": "application/json"},
+        body=b"{}",
+        request_body={},
+    )
+    restored_paper = parse_json(body)
+    session.ensure(
+        not restored_paper["is_deleted"],
+        "restored admin paper detail should mark the paper active",
+    )
+    session.perform_request(
+        f"GET /papers/{restorable_paper_id} after restore",
+        200,
+        path=f"/papers/{restorable_paper_id}",
+    )
+
     for paper_id in reversed(paper_ids):
         session.perform_request(
             f"DELETE /papers/{paper_id}",
@@ -1314,9 +1452,20 @@ def run_ops_and_cleanup(
             path=f"/papers/{paper_id}",
         )
     session.perform_request(
-        f"GET /papers/{paper_ids[0]} after delete",
+        f"GET /papers/{paper_ids[0]} after final soft delete",
         404,
         path=f"/papers/{paper_ids[0]}",
+    )
+
+    _, body, _ = session.perform_request(
+        "GET /admin/papers?state=deleted after full paper soft delete",
+        200,
+        path="/admin/papers?state=deleted&limit=10",
+    )
+    all_deleted_paper_ids = sorted(item["paper_id"] for item in parse_json(body))
+    session.ensure(
+        all_deleted_paper_ids == expected_deleted_paper_ids,
+        "admin deleted paper list should contain every soft-deleted paper before GC",
     )
 
     for question_id in reversed(created_question_ids + synthetic_question_ids):
@@ -1332,8 +1481,138 @@ def run_ops_and_cleanup(
         path=f"/questions/{created_question_ids[0]}",
     )
 
+    _, body, _ = session.perform_request(
+        "GET /admin/questions?state=deleted after full question soft delete",
+        200,
+        path="/admin/questions?state=deleted&limit=20",
+    )
+    all_deleted_question_ids = sorted(item["question_id"] for item in parse_json(body))
+    session.ensure(
+        all_deleted_question_ids == expected_deleted_question_ids,
+        "admin deleted question list should contain every soft-deleted question before GC",
+    )
+
+    _, body, _ = session.json_request(
+        "POST /admin/garbage-collections/preview",
+        200,
+        method="POST",
+        path="/admin/garbage-collections/preview",
+        payload={},
+    )
+    preview_response = parse_json(body)
+    session.ensure(
+        preview_response["dry_run"] is True,
+        "garbage-collection preview should report dry_run=true",
+    )
+    session.ensure(
+        preview_response["deleted_papers"] == len(paper_ids),
+        "garbage-collection preview should include every soft-deleted paper",
+    )
+    session.ensure(
+        preview_response["deleted_questions"] == total_question_count,
+        "garbage-collection preview should include every soft-deleted question",
+    )
+    session.ensure(
+        preview_response["deleted_objects"] > 0,
+        "garbage-collection preview should include orphaned binary objects",
+    )
+    session.ensure(
+        preview_response["freed_bytes"] > 0,
+        "garbage-collection preview should report freed bytes",
+    )
+
+    _, body, _ = session.perform_request(
+        "GET /admin/questions?state=deleted after GC preview rollback",
+        200,
+        path="/admin/questions?state=deleted&limit=20",
+    )
+    session.ensure(
+        sorted(item["question_id"] for item in parse_json(body))
+        == expected_deleted_question_ids,
+        "garbage-collection preview should roll back deleted question rows",
+    )
+
+    _, body, _ = session.json_request(
+        "POST /admin/garbage-collections/run",
+        200,
+        method="POST",
+        path="/admin/garbage-collections/run",
+        payload={},
+    )
+    gc_response = parse_json(body)
+    session.ensure(
+        {
+            key: value for key, value in gc_response.items() if key != "dry_run"
+        }
+        == {
+            key: value for key, value in preview_response.items() if key != "dry_run"
+        },
+        "garbage-collection run should match preview counts on the same dataset",
+    )
+    session.ensure(
+        gc_response["dry_run"] is False,
+        "garbage-collection run should report dry_run=false",
+    )
+
+    _, body, _ = session.perform_request(
+        "GET /admin/papers?state=all after GC",
+        200,
+        path="/admin/papers?state=all&limit=10",
+    )
+    session.ensure(
+        parse_json(body) == [],
+        "admin paper list should be empty after garbage collection hard deletes papers",
+    )
+    _, body, _ = session.perform_request(
+        "GET /admin/questions?state=all after GC",
+        200,
+        path="/admin/questions?state=all&limit=20",
+    )
+    session.ensure(
+        parse_json(body) == [],
+        "admin question list should be empty after garbage collection hard deletes questions",
+    )
+
+    session.perform_request(
+        f"POST /admin/questions/{restorable_question_id}/restore after GC",
+        404,
+        method="POST",
+        path=f"/admin/questions/{restorable_question_id}/restore",
+        headers={"content-type": "application/json"},
+        body=b"{}",
+        request_body={},
+    )
+    session.perform_request(
+        f"POST /admin/papers/{restorable_paper_id}/restore after GC",
+        404,
+        method="POST",
+        path=f"/admin/papers/{restorable_paper_id}/restore",
+        headers={"content-type": "application/json"},
+        body=b"{}",
+        request_body={},
+    )
+
+    _, body, _ = session.json_request(
+        "POST /admin/garbage-collections/preview after GC",
+        200,
+        method="POST",
+        path="/admin/garbage-collections/preview",
+        payload={},
+    )
+    session.ensure(
+        parse_json(body)
+        == {
+            "dry_run": True,
+            "deleted_questions": 0,
+            "deleted_papers": 0,
+            "deleted_objects": 0,
+            "freed_bytes": 0,
+        },
+        "garbage-collection preview should be empty after the purge finishes",
+    )
+
     session.validation_notes.append(
-        "Synthetic question CRUD/filter coverage, question/paper file replacement coverage, real-theory and real-experiment paper bundle coverage, export, quality-check, and delete assertions all passed."
+        "Synthetic question CRUD/filter coverage, question/paper file replacement coverage, real-theory and real-experiment paper bundle coverage, export, quality-check, active-paper delete protection, admin soft-delete visibility, restore validation, and garbage-collection preview/run assertions all passed."
     )
 
 
@@ -1439,6 +1718,8 @@ def main() -> None:
             all_created_real_question_ids,
             synthetic_question_ids,
             len(synthetic_question_ids) + len(all_created_real_question_ids),
+            created_real_theory_question_ids[4],
+            theory_paper_ids[1],
         )
     except Exception:
         run_status = "failed"

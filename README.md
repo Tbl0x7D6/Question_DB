@@ -4,12 +4,18 @@ Rust + Axum + PostgreSQL 题库服务。当前版本的核心流程是：
 
 1. 上传单题 zip 压缩包导入题目
 2. 用一组有序题目引用创建试卷
+3. 删除走软删除，管理员可恢复记录并回收无引用 binary
 
 ## 项目架构
 
 ```text
 src/
 ├── api/
+│   ├── admin/
+│   │   ├── API.md
+│   │   ├── handlers.rs
+│   │   ├── models.rs
+│   │   └── queries.rs
 │   ├── mod.rs
 │   ├── questions/
 │   │   ├── API.md
@@ -44,7 +50,7 @@ src/
 - `objects`
   单表保存任意上传文件的元数据与二进制内容。
 - `questions`
-  保存题目固定 metadata。
+  保存题目固定 metadata，以及软删除字段 `deleted_at` / `deleted_by`。
 - `question_files`
   保存题目的 TeX 文件和资源文件引用。
 - `question_tags`
@@ -52,7 +58,7 @@ src/
 - `question_difficulties`
   保存每个 difficulty tag 的 `score` / `notes`。
 - `papers`
-  保存试卷固定元数据。
+  保存试卷固定元数据，以及软删除字段 `deleted_at` / `deleted_by`。
 - `paper_questions`
   保存试卷和题目的有序关联。
 
@@ -150,6 +156,11 @@ curl -X POST http://127.0.0.1:8080/questions \
 
 `DELETE /questions/{question_id}`
 
+说明：
+
+- 这是软删除，不会立刻删除 binary
+- 如果题目仍被未软删除试卷引用，会返回 `409`
+
 ### 批量下载题目包
 
 `POST /questions/bundles`
@@ -208,6 +219,10 @@ curl -X POST http://127.0.0.1:8080/papers \
 
 `DELETE /papers/{paper_id}`
 
+说明：
+
+- 这是软删除，不会立刻删除 appendix binary
+
 ### 批量下载试卷包
 
 `POST /papers/bundles`
@@ -233,6 +248,14 @@ curl -X POST http://127.0.0.1:8080/papers \
 - `GET /questions`
 - `GET /questions/{question_id}`
 - `POST /questions/bundles`
+- `GET /admin/questions`
+- `GET /admin/questions/{question_id}`
+- `POST /admin/questions/{question_id}/restore`
+- `GET /admin/papers`
+- `GET /admin/papers/{paper_id}`
+- `POST /admin/papers/{paper_id}/restore`
+- `POST /admin/garbage-collections/preview`
+- `POST /admin/garbage-collections/run`
 - `POST /exports/run`
 - `POST /quality-checks/run`
 
@@ -243,6 +266,13 @@ curl -X POST http://127.0.0.1:8080/papers \
 - `difficulty_max`
 
 其中 `difficulty_min` / `difficulty_max` 需要和 `difficulty_tag` 一起使用。
+
+说明：
+
+- 普通 `/questions` 和 `/papers` 接口默认只返回未软删除记录
+- 管理员查询、恢复和垃圾回收见 [Admin API](/home/be/Question_DB/src/api/admin/API.md)
+- `POST /exports/run` 只导出未软删除题目
+- `POST /quality-checks/run` 只检查未软删除题目和试卷
 
 ## 启动
 

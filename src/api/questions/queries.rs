@@ -39,7 +39,7 @@ impl QuestionsParams {
                    to_char(q.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at,
                    to_char(q.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at
             FROM questions q
-            WHERE 1 = 1",
+            WHERE q.deleted_at IS NULL",
         );
         let mut bind_count = 0;
 
@@ -71,7 +71,7 @@ impl QuestionsParams {
         }
         if let Some(paper_id) = &self.paper_id {
             builder
-                .push(" AND EXISTS (SELECT 1 FROM paper_questions pq WHERE pq.question_id = q.question_id AND pq.paper_id = ")
+                .push(" AND EXISTS (SELECT 1 FROM paper_questions pq JOIN papers p ON p.paper_id = pq.paper_id WHERE pq.question_id = q.question_id AND p.deleted_at IS NULL AND pq.paper_id = ")
                 .push_bind(paper_id)
                 .push("::uuid)");
             bind_count += 1;
