@@ -16,15 +16,22 @@
   - 传 JSON 字符串
   - 必须至少包含 `human`
   - 每个 tag 的值形如 `{ "score": 7, "notes": "sample" }`
+- 可选字段：`category`
+  - `none` | `T` | `E`
+- 可选字段：`tags`
+  - 传 JSON 字符串数组
+  - 会去重；`[]` 表示创建时无标签
+- 可选字段：`status`
+  - `none` | `reviewed` | `used`
 - 大小限制：20 MiB
 - zip 根目录必须包含且只包含：
   - 恰好一个 `.tex` 文件
   - 恰好一个 `assets/` 目录
-- 上传时自动写入默认 metadata：
+- 如果未传可选 metadata，则默认：
   - `category = "none"`
   - `tags = []`
   - `status = "none"`
-  - `created_at = NOW()`
+- `created_at = NOW()`
 
 成功响应：
 
@@ -40,6 +47,8 @@
 ### `PATCH /questions/{question_id}`
 
 使用 JSON 请求体更新题目的 metadata，支持部分更新。
+
+- 服务端会先锁定目标题目的主记录；同一题目的 metadata 更新、文件替换和删除会串行执行，避免并发重建 `tags` / `difficulty` 时出现竞态
 
 支持字段：
 

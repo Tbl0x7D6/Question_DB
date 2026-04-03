@@ -13,7 +13,8 @@ use uuid::Uuid;
 use zip::ZipArchive;
 
 use super::models::{
-    NormalizedQuestionDifficulty, QuestionFileReplaceResponse, QuestionImportResponse,
+    NormalizedCreateQuestionRequest, NormalizedQuestionDifficulty, QuestionFileReplaceResponse,
+    QuestionImportResponse,
 };
 
 pub(crate) const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
@@ -34,8 +35,7 @@ struct LoadedQuestionZip {
 pub(crate) async fn import_question_zip(
     pool: &PgPool,
     file_name: Option<&str>,
-    description: &str,
-    difficulty: &NormalizedQuestionDifficulty,
+    request: &NormalizedCreateQuestionRequest,
     zip_bytes: Vec<u8>,
 ) -> Result<QuestionImportResponse> {
     if zip_bytes.is_empty() {
@@ -58,31 +58,22 @@ pub(crate) async fn import_question_zip(
             question_id, source_tex_path, category, status, description, created_at, updated_at
         )
         VALUES (
-            $1::uuid, $2, 'none', 'none', $3, NOW(), NOW()
+            $1::uuid, $2, $3, $4, $5, NOW(), NOW()
         )
         "#,
     )
     .bind(&question_id)
     .bind(&loaded.tex_file.path)
-    .bind(description)
+    .bind(&request.category)
+    .bind(&request.status)
+    .bind(&request.description)
     .execute(&mut *tx)
     .await
     .context("insert uploaded question failed")?;
 
     insert_loaded_question_files_tx(&mut tx, &question_id, &loaded).await?;
-
-    for (algorithm_tag, value) in difficulty {
-        query(
-            "INSERT INTO question_difficulties (question_id, algorithm_tag, score, notes) VALUES ($1::uuid, $2, $3, $4)",
-        )
-        .bind(&question_id)
-        .bind(algorithm_tag)
-        .bind(value.score)
-        .bind(value.notes.as_deref())
-        .execute(&mut *tx)
-        .await
-        .with_context(|| format!("insert question difficulty failed: {algorithm_tag}"))?;
-    }
+    insert_question_tags_tx(&mut tx, &question_id, &request.tags).await?;
+    insert_question_difficulties_tx(&mut tx, &question_id, &request.difficulty).await?;
 
     tx.commit().await.context("commit question import failed")?;
 
@@ -114,11 +105,13 @@ pub(crate) async fn replace_question_zip(
         .await
         .context("begin question file replace tx failed")?;
 
-    let exists = query("SELECT 1 FROM questions WHERE question_id = $1::uuid")
+    // Lock the parent row before rebuilding child rows so file replacement
+    // cannot race metadata updates or deletion of the same question.
+    let exists = query("SELECT 1 FROM questions WHERE question_id = $1::uuid FOR UPDATE")
         .bind(question_id)
         .fetch_optional(&mut *tx)
         .await
-        .context("check question existence failed")?
+        .context("lock question row for file replace failed")?
         .is_some();
     if !exists {
         bail!("question not found: {question_id}");
@@ -331,6 +324,45 @@ async fn insert_loaded_question_files_tx(
             mime.as_deref(),
         )
         .await?;
+    }
+
+    Ok(())
+}
+
+async fn insert_question_tags_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    question_id: &str,
+    tags: &[String],
+) -> Result<()> {
+    for (idx, tag) in tags.iter().enumerate() {
+        query("INSERT INTO question_tags (question_id, tag, sort_order) VALUES ($1::uuid, $2, $3)")
+            .bind(question_id)
+            .bind(tag)
+            .bind(i32::try_from(idx).unwrap_or(i32::MAX))
+            .execute(&mut **tx)
+            .await
+            .with_context(|| format!("insert question tag failed: {tag}"))?;
+    }
+
+    Ok(())
+}
+
+async fn insert_question_difficulties_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    question_id: &str,
+    difficulty: &NormalizedQuestionDifficulty,
+) -> Result<()> {
+    for (algorithm_tag, value) in difficulty {
+        query(
+            "INSERT INTO question_difficulties (question_id, algorithm_tag, score, notes) VALUES ($1::uuid, $2, $3, $4)",
+        )
+        .bind(question_id)
+        .bind(algorithm_tag)
+        .bind(value.score)
+        .bind(value.notes.as_deref())
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("insert question difficulty failed: {algorithm_tag}"))?;
     }
 
     Ok(())

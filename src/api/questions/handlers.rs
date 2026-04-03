@@ -10,9 +10,9 @@ use uuid::Uuid;
 use super::{
     imports::{import_question_zip, replace_question_zip, MAX_UPLOAD_BYTES},
     models::{
-        QuestionDeleteResponse, QuestionDetail, QuestionDifficulty, QuestionFileReplaceResponse,
-        QuestionImportResponse, QuestionPaperRef, QuestionSummary, QuestionsParams,
-        UpdateQuestionMetadataRequest,
+        CreateQuestionRequest, QuestionDeleteResponse, QuestionDetail, QuestionDifficulty,
+        QuestionFileReplaceResponse, QuestionImportResponse, QuestionPaperRef, QuestionSummary,
+        QuestionsParams, UpdateQuestionMetadataRequest,
     },
     queries::{
         execute_questions_query, load_question_difficulties, load_question_files,
@@ -22,7 +22,6 @@ use super::{
 };
 use crate::api::{
     shared::error::{ApiError, ApiResult},
-    shared::utils::normalize_bundle_description,
     AppState,
 };
 
@@ -68,6 +67,9 @@ pub(crate) async fn create_question(
 ) -> ApiResult<QuestionImportResponse> {
     let mut file_name = None;
     let mut description = None;
+    let mut category = None;
+    let mut tags = None;
+    let mut status = None;
     let mut difficulty = None;
     let mut bytes = Vec::new();
 
@@ -91,16 +93,19 @@ pub(crate) async fn create_question(
                     .to_vec();
             }
             "description" => {
-                let value = field.text().await.map_err(|err| {
-                    ApiError::bad_request(format!("read description field failed: {err}"))
-                })?;
-                description = Some(value);
+                description = Some(read_text_field(field, "description").await?);
+            }
+            "category" => {
+                category = Some(read_text_field(field, "category").await?);
+            }
+            "tags" => {
+                tags = Some(read_json_string_list_field(field, "tags").await?);
+            }
+            "status" => {
+                status = Some(read_text_field(field, "status").await?);
             }
             "difficulty" => {
-                let value = field.text().await.map_err(|err| {
-                    ApiError::bad_request(format!("read difficulty field failed: {err}"))
-                })?;
-                difficulty = Some(value);
+                difficulty = Some(read_question_difficulty_field(field).await?);
             }
             _ => {}
         }
@@ -111,41 +116,27 @@ pub(crate) async fn create_question(
             "multipart form must include a non-empty 'file' field",
         ));
     }
-    let description = description
-        .ok_or_else(|| {
+    let request = CreateQuestionRequest {
+        description: description.ok_or_else(|| {
             ApiError::bad_request("multipart form must include a non-empty 'description' field")
-        })
-        .and_then(|value| {
-            normalize_bundle_description("description", &value)
-                .map_err(|err| ApiError::bad_request(err.to_string()))
-        })?;
-    let difficulty = difficulty
-        .ok_or_else(|| {
+        })?,
+        category,
+        tags,
+        status,
+        difficulty: difficulty.ok_or_else(|| {
             ApiError::bad_request("multipart form must include a non-empty 'difficulty' field")
-        })
-        .and_then(|value| {
-            serde_json::from_str::<QuestionDifficulty>(&value)
-                .map_err(|err| ApiError::bad_request(format!("invalid difficulty field: {err}")))
-                .and_then(|difficulty| {
-                    difficulty
-                        .normalize()
-                        .map_err(|err| ApiError::bad_request(err.to_string()))
-                })
-        })?;
+        })?,
+    }
+    .normalize()
+    .map_err(|err| ApiError::bad_request(err.to_string()))?;
     if bytes.len() > MAX_UPLOAD_BYTES {
         return Err(ApiError::bad_request("uploaded zip exceeds 20 MiB limit"));
     }
 
     Ok(Json(
-        import_question_zip(
-            &state.pool,
-            file_name.as_deref(),
-            &description,
-            &difficulty,
-            bytes,
-        )
-        .await
-        .map_err(ApiError::from)?,
+        import_question_zip(&state.pool, file_name.as_deref(), &request, bytes)
+            .await
+            .map_err(ApiError::from)?,
     ))
 }
 
@@ -191,11 +182,13 @@ pub(crate) async fn update_question_metadata(
         .await
         .context("begin question metadata update tx failed")?;
 
-    let exists = query("SELECT 1 FROM questions WHERE question_id = $1::uuid")
+    // Lock the parent row up front so concurrent writers on the same question
+    // serialize even when child-table replacement starts from an empty set.
+    let exists = query("SELECT 1 FROM questions WHERE question_id = $1::uuid FOR UPDATE")
         .bind(&question_id)
         .fetch_optional(&mut *tx)
         .await
-        .context("check question existence failed")?
+        .context("lock question row for metadata update failed")?
         .is_some();
     if !exists {
         return Err(ApiError {
@@ -421,6 +414,33 @@ async fn read_uploaded_file_from_multipart(
     }
 
     Ok((file_name, bytes))
+}
+
+async fn read_text_field(
+    field: axum::extract::multipart::Field<'_>,
+    field_name: &str,
+) -> Result<String, ApiError> {
+    field
+        .text()
+        .await
+        .map_err(|err| ApiError::bad_request(format!("read {field_name} field failed: {err}")))
+}
+
+async fn read_json_string_list_field(
+    field: axum::extract::multipart::Field<'_>,
+    field_name: &str,
+) -> Result<Vec<String>, ApiError> {
+    let text = read_text_field(field, field_name).await?;
+    serde_json::from_str::<Vec<String>>(&text)
+        .map_err(|err| ApiError::bad_request(format!("invalid {field_name} field: {err}")))
+}
+
+async fn read_question_difficulty_field(
+    field: axum::extract::multipart::Field<'_>,
+) -> Result<QuestionDifficulty, ApiError> {
+    let text = read_text_field(field, "difficulty").await?;
+    serde_json::from_str::<QuestionDifficulty>(&text)
+        .map_err(|err| ApiError::bad_request(format!("invalid difficulty field: {err}")))
 }
 
 fn map_question_file_replace_error(err: anyhow::Error) -> ApiError {
