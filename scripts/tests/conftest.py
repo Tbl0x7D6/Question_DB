@@ -92,6 +92,9 @@ def api(state: E2EState):
     # Verify API is reachable
     client.get("/health")
 
+    # Login as admin (seeded by the API on first startup)
+    client.login("admin", "changeme")
+
     yield client
 
     if not skip_infra:

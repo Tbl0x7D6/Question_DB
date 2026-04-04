@@ -19,6 +19,7 @@ async fn health_route_returns_service_unavailable_when_db_is_unreachable() {
         AppState {
             pool,
             export_dir: PathBuf::from("exports"),
+            jwt_secret: "test-secret".to_string(),
         },
         &[],
     );

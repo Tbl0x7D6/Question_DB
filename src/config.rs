@@ -11,6 +11,7 @@ pub struct AppConfig {
     pub max_db_connections: u32,
     pub export_dir: PathBuf,
     pub cors_origins: Vec<String>,
+    pub jwt_secret: String,
 }
 
 impl AppConfig {
@@ -39,12 +40,16 @@ impl AppConfig {
             .map(str::to_string)
             .collect();
 
+        let jwt_secret = env::var("QB_JWT_SECRET")
+            .unwrap_or_else(|_| "qb-dev-secret-change-me-in-production".to_string());
+
         Ok(Self {
             database_url,
             bind_addr,
             max_db_connections,
             export_dir,
             cors_origins,
+            jwt_secret,
         })
     }
 }

@@ -82,21 +82,49 @@ class ApiClient:
     def __init__(self) -> None:
         self._api_proc: subprocess.Popen | None = None
         self._api_log: Any = None
+        self._access_token: str | None = None
+
+    # -- Auth helpers --
+
+    def login(self, username: str = "admin", password: str = "changeme") -> dict:
+        """Login and store the access token for subsequent requests."""
+        _, body, _ = self._do(
+            "POST", "/auth/login", expect=200,
+            headers={"content-type": "application/json"},
+            body=json.dumps({"username": username, "password": password}).encode(),
+        )
+        data = parse_json(body)
+        self._access_token = data["access_token"]
+        return data
+
+    def login_as(self, username: str, password: str) -> dict:
+        """Login as a specific user and store the token."""
+        return self.login(username, password)
+
+    def set_token(self, token: str | None) -> None:
+        """Manually set or clear the auth token."""
+        self._access_token = token
+
+    def _auth_headers(self) -> dict[str, str]:
+        """Return Authorization header if logged in."""
+        if self._access_token:
+            return {"Authorization": f"Bearer {self._access_token}"}
+        return {}
 
     # -- HTTP verbs --
 
     def get(self, path: str, *, expect: int = 200):
-        return self._do("GET", path, expect=expect)
+        return self._do("GET", path, expect=expect, headers=self._auth_headers())
 
     def delete(self, path: str, *, expect: int = 200):
-        return self._do("DELETE", path, expect=expect)
+        return self._do("DELETE", path, expect=expect, headers=self._auth_headers())
 
     def post_json(self, path: str, payload: dict, *, expect: int = 200):
         return self._do(
             "POST",
             path,
             expect=expect,
-            headers={"content-type": "application/json"},
+            headers={"content-type": "application/json", **self._auth_headers()},
             body=json.dumps(payload, ensure_ascii=False).encode(),
         )
 
@@ -105,7 +133,7 @@ class ApiClient:
             "PATCH",
             path,
             expect=expect,
-            headers={"content-type": "application/json"},
+            headers={"content-type": "application/json", **self._auth_headers()},
             body=json.dumps(payload, ensure_ascii=False).encode(),
         )
 
@@ -139,7 +167,10 @@ class ApiClient:
             method,
             path,
             expect=expect,
-            headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+            headers={
+                "content-type": f"multipart/form-data; boundary={boundary}",
+                **self._auth_headers(),
+            },
             body=bytes(raw),
         )
 
@@ -155,7 +186,7 @@ class ApiClient:
             f"http://127.0.0.1:{API_PORT}{path}",
             data=json.dumps(payload, ensure_ascii=False).encode(),
             method="POST",
-            headers={"content-type": "application/json"},
+            headers={"content-type": "application/json", **self._auth_headers()},
         )
         try:
             with urllib.request.urlopen(req) as resp:
@@ -202,14 +233,16 @@ class ApiClient:
         self._wait_pg()
 
     def apply_migration(self) -> None:
-        sql = (ROOT_DIR / "migrations" / "0001_init_pg.sql").read_bytes()
-        subprocess.run(
-            [
-                "docker", "exec", "-i", CONTAINER_NAME,
-                "psql", "-U", "postgres", "-d", "qb",
-            ],
-            input=sql, cwd=ROOT_DIR, check=True, capture_output=True,
-        )
+        migrations_dir = ROOT_DIR / "migrations"
+        for sql_file in sorted(migrations_dir.glob("*.sql")):
+            sql = sql_file.read_bytes()
+            subprocess.run(
+                [
+                    "docker", "exec", "-i", CONTAINER_NAME,
+                    "psql", "-U", "postgres", "-d", "qb",
+                ],
+                input=sql, cwd=ROOT_DIR, check=True, capture_output=True,
+            )
 
     def start_api(self) -> None:
         self._api_log = API_LOG_PATH.open("wb")

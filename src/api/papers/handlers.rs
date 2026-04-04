@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use anyhow::Context;
 use axum::{
     extract::{Multipart, Path as AxumPath, Query, State},
-    Json,
+    Extension, Json,
 };
 use sqlx::{query, Row};
 use uuid::Uuid;
@@ -20,6 +20,7 @@ use super::{
     },
 };
 use crate::api::{
+    auth::models::CurrentUser,
     shared::{
         details::{load_paper_detail, DetailVisibility},
         error::{ApiError, ApiResult},
@@ -253,6 +254,7 @@ pub(crate) async fn update_paper(
 
 pub(crate) async fn delete_paper(
     AxumPath(paper_id): AxumPath<String>,
+    Extension(current): Extension<CurrentUser>,
     State(state): State<AppState>,
 ) -> ApiResult<PaperDeleteResponse> {
     parse_uuid_param(&paper_id, "paper_id")?;
@@ -275,9 +277,10 @@ pub(crate) async fn delete_paper(
     }
 
     query(
-        "UPDATE papers SET deleted_at = NOW(), deleted_by = NULL, updated_at = NOW() WHERE paper_id = $1::uuid",
+        "UPDATE papers SET deleted_at = NOW(), deleted_by = $2, updated_at = NOW() WHERE paper_id = $1::uuid",
     )
     .bind(&paper_id)
+    .bind(&current.user_id)
     .execute(&mut *tx)
     .await
     .context("soft delete paper failed")?;

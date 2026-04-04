@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path as AxumPath, Query, State},
-    Json,
+    Extension, Json,
 };
 
 use super::{
@@ -17,6 +17,14 @@ use super::{
     },
 };
 use crate::api::{
+    auth::{
+        models::{
+            AdminUsersParams, CreateUserRequest, CurrentUser, MessageResponse, Role,
+            UpdateUserRequest, UserProfile,
+        },
+        password::hash_password,
+        queries as auth_queries,
+    },
     shared::{
         error::{ApiError, ApiResult},
         multipart::parse_uuid_param,
@@ -133,4 +141,112 @@ pub(crate) async fn run_gc(
             .await
             .map_err(ApiError::from)?,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// User management
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn list_users(
+    Query(params): Query<AdminUsersParams>,
+    State(state): State<AppState>,
+) -> ApiResult<Paginated<UserProfile>> {
+    let (users, total) = auth_queries::list_users(&state.pool, params.limit, params.offset)
+        .await
+        .map_err(ApiError::from)?;
+    let limit = crate::api::shared::pagination::normalize_limit(params.limit);
+    let offset = crate::api::shared::pagination::normalize_offset(params.offset);
+    Ok(Json(Paginated {
+        items: users,
+        total,
+        limit,
+        offset,
+    }))
+}
+
+pub(crate) async fn create_user(
+    State(state): State<AppState>,
+    Json(req): Json<CreateUserRequest>,
+) -> ApiResult<UserProfile> {
+    let username = req.username.trim();
+    if username.is_empty() {
+        return Err(ApiError::bad_request("username must not be empty"));
+    }
+    if req.password.len() < 6 {
+        return Err(ApiError::bad_request(
+            "password must be at least 6 characters",
+        ));
+    }
+
+    let role_str = req.role.as_deref().unwrap_or("viewer");
+    if Role::from_str(role_str).is_none() {
+        return Err(ApiError::bad_request(
+            "role must be one of: viewer, editor, admin",
+        ));
+    }
+
+    let display_name = req.display_name.as_deref().unwrap_or("");
+    let pw_hash =
+        hash_password(&req.password).map_err(|_| ApiError::internal("password hash error"))?;
+
+    let profile =
+        auth_queries::create_user(&state.pool, username, display_name, &pw_hash, role_str)
+            .await
+            .map_err(ApiError::from)?;
+
+    Ok(Json(profile))
+}
+
+pub(crate) async fn update_user(
+    AxumPath(user_id): AxumPath<String>,
+    Extension(current): Extension<CurrentUser>,
+    State(state): State<AppState>,
+    Json(req): Json<UpdateUserRequest>,
+) -> ApiResult<UserProfile> {
+    parse_uuid_param(&user_id, "user_id")?;
+
+    // Prevent admin from deactivating themselves
+    if req.is_active == Some(false) && current.user_id == user_id {
+        return Err(ApiError::bad_request("cannot deactivate your own account"));
+    }
+
+    if let Some(role_str) = &req.role {
+        if Role::from_str(role_str).is_none() {
+            return Err(ApiError::bad_request(
+                "role must be one of: viewer, editor, admin",
+            ));
+        }
+    }
+
+    let profile = auth_queries::update_user(
+        &state.pool,
+        &user_id,
+        req.display_name.as_deref(),
+        req.role.as_deref(),
+        req.is_active,
+    )
+    .await
+    .map_err(ApiError::from)?;
+
+    Ok(Json(profile))
+}
+
+pub(crate) async fn delete_user(
+    AxumPath(user_id): AxumPath<String>,
+    Extension(current): Extension<CurrentUser>,
+    State(state): State<AppState>,
+) -> ApiResult<MessageResponse> {
+    parse_uuid_param(&user_id, "user_id")?;
+
+    if current.user_id == user_id {
+        return Err(ApiError::bad_request("cannot delete your own account"));
+    }
+
+    auth_queries::delete_user(&state.pool, &user_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(MessageResponse {
+        message: "user deactivated",
+    }))
 }

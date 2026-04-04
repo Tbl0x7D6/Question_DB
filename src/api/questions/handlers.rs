@@ -1,7 +1,7 @@
 use anyhow::Context;
 use axum::{
     extract::{Multipart, Path as AxumPath, Query, State},
-    Json,
+    Extension, Json,
 };
 use sqlx::{query, Row};
 
@@ -18,6 +18,7 @@ use super::{
     },
 };
 use crate::api::{
+    auth::models::CurrentUser,
     shared::{
         details::{load_question_detail, DetailVisibility},
         error::{ApiError, ApiResult},
@@ -317,6 +318,7 @@ pub(crate) async fn update_question_metadata(
 
 pub(crate) async fn delete_question(
     AxumPath(question_id): AxumPath<String>,
+    Extension(current): Extension<CurrentUser>,
     State(state): State<AppState>,
 ) -> ApiResult<QuestionDeleteResponse> {
     parse_uuid_param(&question_id, "question_id")?;
@@ -362,9 +364,10 @@ pub(crate) async fn delete_question(
     }
 
     query(
-        "UPDATE questions SET deleted_at = NOW(), deleted_by = NULL, updated_at = NOW() WHERE question_id = $1::uuid",
+        "UPDATE questions SET deleted_at = NOW(), deleted_by = $2, updated_at = NOW() WHERE question_id = $1::uuid",
     )
     .bind(&question_id)
+    .bind(&current.user_id)
     .execute(&mut *tx)
     .await
     .context("soft delete question failed")?;

@@ -1,5 +1,10 @@
 # Questions API
 
+鉴权要求：
+- `GET` 操作：需要 `viewer` 及以上角色
+- `POST / PATCH / DELETE / PUT` 操作：需要 `editor` 及以上角色
+- 所有请求需携带 `Authorization: Bearer <access_token>` 头
+
 ## Endpoints
 
 ### `POST /questions`

@@ -1,5 +1,7 @@
 # Ops API
 
+鉴权要求：需要 `editor` 及以上角色，所有请求需携带 `Authorization: Bearer <access_token>` 头。
+
 ## Endpoints
 
 题目和试卷的批量打包下载接口见：

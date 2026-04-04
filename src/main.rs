@@ -1,6 +1,6 @@
 use anyhow::Result;
 use qb_api::{
-    api::{router, AppState},
+    api::{hash_password, router, seed_admin_if_empty, AppState},
     config::AppConfig,
     db::create_pool,
 };
@@ -17,9 +17,23 @@ async fn main() -> Result<()> {
     let cfg = AppConfig::from_env()?;
     let pool = create_pool(&cfg.database_url, cfg.max_db_connections).await?;
 
+    // Seed default admin account if the users table is empty.
+    // Default password is "changeme" – MUST be changed after first login.
+    match hash_password("changeme") {
+        Ok(default_hash) => match seed_admin_if_empty(&pool, &default_hash).await {
+            Ok(true) => {
+                tracing::info!("seeded default admin user (username=admin, password=changeme)")
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!("could not seed admin user (table may not exist yet): {e}"),
+        },
+        Err(e) => tracing::warn!("could not hash default password: {e}"),
+    }
+
     let state = AppState {
         pool,
         export_dir: cfg.export_dir.clone(),
+        jwt_secret: cfg.jwt_secret.clone(),
     };
     let app = router(state, &cfg.cors_origins);
     let listener = TcpListener::bind(cfg.bind_addr).await?;

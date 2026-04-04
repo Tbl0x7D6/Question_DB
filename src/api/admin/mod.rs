@@ -29,4 +29,13 @@ pub(crate) fn router() -> Router<super::AppState> {
             "/admin/garbage-collections/run",
             axum::routing::post(handlers::run_gc),
         )
+        // User management
+        .route(
+            "/admin/users",
+            get(handlers::list_users).post(handlers::create_user),
+        )
+        .route(
+            "/admin/users/:user_id",
+            axum::routing::patch(handlers::update_user).delete(handlers::delete_user),
+        )
 }
