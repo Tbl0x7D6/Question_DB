@@ -5,6 +5,7 @@ use axum::{
 use http_body_util::BodyExt;
 use qb_api::api::{router, AppState};
 use sqlx::postgres::PgPoolOptions;
+use std::path::PathBuf;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -14,7 +15,13 @@ async fn health_route_returns_service_unavailable_when_db_is_unreachable() {
         .max_connections(1)
         .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/qb")
         .unwrap();
-    let app = router(AppState { pool });
+    let app = router(
+        AppState {
+            pool,
+            export_dir: PathBuf::from("exports"),
+        },
+        &[],
+    );
 
     let response = app
         .oneshot(
@@ -28,5 +35,6 @@ async fn health_route_returns_service_unavailable_when_db_is_unreachable() {
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    assert!(body.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("body should be JSON");
+    assert!(json.get("error").is_some());
 }

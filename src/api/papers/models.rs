@@ -4,8 +4,9 @@ use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::api::questions::models::validate_question_category;
-use crate::api::shared::utils::{
-    normalize_bundle_description, normalize_optional_bundle_description,
+use crate::api::shared::{
+    pagination::{normalize_limit, normalize_offset},
+    utils::{normalize_bundle_description, normalize_optional_bundle_description},
 };
 
 #[derive(Debug, Serialize)]
@@ -193,11 +194,11 @@ impl UpdatePaperRequest {
 
 impl PapersParams {
     pub(crate) fn normalized_limit(&self) -> i64 {
-        self.limit.unwrap_or(20).clamp(1, 100)
+        normalize_limit(self.limit)
     }
 
     pub(crate) fn normalized_offset(&self) -> i64 {
-        self.offset.unwrap_or(0).max(0)
+        normalize_offset(self.offset)
     }
 }
 

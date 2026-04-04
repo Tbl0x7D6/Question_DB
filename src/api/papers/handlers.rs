@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use anyhow::Context;
 use axum::{
     extract::{Multipart, Path as AxumPath, Query, State},
-    http::StatusCode,
     Json,
 };
 use sqlx::{query, Row};
@@ -13,17 +12,22 @@ use super::{
     imports::{import_paper_zip, replace_paper_zip, MAX_UPLOAD_BYTES},
     models::{
         CreatePaperRequest, PaperDeleteResponse, PaperDetail, PaperFileReplaceResponse,
-        PaperImportResponse, PapersParams, UpdatePaperRequest,
+        PaperImportResponse, PaperSummary, PapersParams, UpdatePaperRequest,
     },
     queries::{
-        ensure_paper_questions_valid, execute_papers_query, validate_and_build_papers_query,
+        count_papers, ensure_paper_questions_valid, execute_papers_query, map_paper_summary,
+        validate_and_build_papers_query,
     },
 };
 use crate::api::{
-    questions::queries::map_paper_summary,
     shared::{
         details::{load_paper_detail, DetailVisibility},
         error::{ApiError, ApiResult},
+        multipart::{
+            next_multipart_field, parse_uuid_param, read_file_field, read_json_field,
+            read_text_field, read_uploaded_file, validate_upload_size,
+        },
+        pagination::Paginated,
     },
     AppState,
 };
@@ -31,13 +35,28 @@ use crate::api::{
 pub(crate) async fn list_papers(
     Query(params): Query<PapersParams>,
     State(state): State<AppState>,
-) -> Result<Json<Vec<super::models::PaperSummary>>, StatusCode> {
-    let plan = validate_and_build_papers_query(&params).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let rows = execute_papers_query(&state.pool, &params, &plan)
+) -> ApiResult<Paginated<PaperSummary>> {
+    let mut plan = validate_and_build_papers_query(&params)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let limit = plan.limit;
+    let offset = plan.offset;
+    let total = count_papers(&state.pool, &params)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .context("count papers failed")
+        .map_err(ApiError::from)?;
+    let rows = execute_papers_query(&state.pool, &mut plan)
+        .await
+        .context("query papers failed")
+        .map_err(ApiError::from)?;
 
-    Ok(Json(rows.into_iter().map(map_paper_summary).collect()))
+    let items = rows.into_iter().map(map_paper_summary).collect();
+
+    Ok(Json(Paginated {
+        items,
+        total,
+        limit,
+        offset,
+    }))
 }
 
 pub(crate) async fn create_paper(
@@ -53,24 +72,15 @@ pub(crate) async fn create_paper(
     let mut question_ids = None;
     let mut bytes = Vec::new();
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| ApiError::bad_request(format!("read multipart field failed: {err}")))?
-    {
+    while let Some(field) = next_multipart_field(&mut multipart).await? {
         let Some(name) = field.name() else {
             continue;
         };
         match name {
             "file" => {
-                file_name = field.file_name().map(str::to_string);
-                bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|err| {
-                        ApiError::bad_request(format!("read uploaded file failed: {err}"))
-                    })?
-                    .to_vec();
+                let (fname, data) = read_file_field(field).await?;
+                file_name = fname;
+                bytes = data;
             }
             "description" => {
                 description = Some(read_text_field(field, "description").await?);
@@ -82,26 +92,19 @@ pub(crate) async fn create_paper(
                 subtitle = Some(read_text_field(field, "subtitle").await?);
             }
             "authors" => {
-                authors = Some(read_json_string_list_field(field, "authors").await?);
+                authors = Some(read_json_field(field, "authors").await?);
             }
             "reviewers" => {
-                reviewers = Some(read_json_string_list_field(field, "reviewers").await?);
+                reviewers = Some(read_json_field(field, "reviewers").await?);
             }
             "question_ids" => {
-                question_ids = Some(read_json_string_list_field(field, "question_ids").await?);
+                question_ids = Some(read_json_field(field, "question_ids").await?);
             }
             _ => {}
         }
     }
 
-    if bytes.is_empty() {
-        return Err(ApiError::bad_request(
-            "multipart form must include a non-empty 'file' field",
-        ));
-    }
-    if bytes.len() > MAX_UPLOAD_BYTES {
-        return Err(ApiError::bad_request("uploaded zip exceeds 20 MiB limit"));
-    }
+    validate_upload_size(&bytes, MAX_UPLOAD_BYTES)?;
 
     let request = CreatePaperRequest {
         description: description.ok_or_else(|| {
@@ -132,7 +135,7 @@ pub(crate) async fn create_paper(
     Ok(Json(
         import_paper_zip(&state.pool, file_name.as_deref(), &request, bytes)
             .await
-            .map_err(map_paper_create_error)?,
+            .map_err(ApiError::from)?,
     ))
 }
 
@@ -141,42 +144,15 @@ pub(crate) async fn replace_paper_file(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> ApiResult<PaperFileReplaceResponse> {
-    Uuid::parse_str(&paper_id)
-        .map_err(|_| ApiError::bad_request(format!("invalid paper_id: {paper_id}")))?;
+    parse_uuid_param(&paper_id, "paper_id")?;
 
-    let mut file_name = None;
-    let mut bytes = Vec::new();
-
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| ApiError::bad_request(format!("read multipart field failed: {err}")))?
-    {
-        if field.name() != Some("file") {
-            continue;
-        }
-
-        file_name = field.file_name().map(str::to_string);
-        bytes = field
-            .bytes()
-            .await
-            .map_err(|err| ApiError::bad_request(format!("read uploaded file failed: {err}")))?
-            .to_vec();
-    }
-
-    if bytes.is_empty() {
-        return Err(ApiError::bad_request(
-            "multipart form must include a non-empty 'file' field",
-        ));
-    }
-    if bytes.len() > MAX_UPLOAD_BYTES {
-        return Err(ApiError::bad_request("uploaded zip exceeds 20 MiB limit"));
-    }
+    let (file_name, bytes) = read_uploaded_file(&mut multipart).await?;
+    validate_upload_size(&bytes, MAX_UPLOAD_BYTES)?;
 
     Ok(Json(
         replace_paper_zip(&state.pool, &paper_id, file_name.as_deref(), bytes)
             .await
-            .map_err(map_paper_file_replace_error)?,
+            .map_err(ApiError::from)?,
     ))
 }
 
@@ -185,8 +161,7 @@ pub(crate) async fn update_paper(
     State(state): State<AppState>,
     Json(request): Json<UpdatePaperRequest>,
 ) -> ApiResult<PaperDetail> {
-    Uuid::parse_str(&paper_id)
-        .map_err(|_| ApiError::bad_request(format!("invalid paper_id: {paper_id}")))?;
+    parse_uuid_param(&paper_id, "paper_id")?;
 
     let update = request
         .normalize()
@@ -305,18 +280,14 @@ pub(crate) async fn update_paper(
 
     tx.commit().await.context("commit paper update failed")?;
 
-    fetch_paper_detail(&state, &paper_id)
-        .await
-        .map(Json)
-        .map_err(map_paper_detail_error)
+    Ok(Json(fetch_paper_detail(&state, &paper_id).await?))
 }
 
 pub(crate) async fn delete_paper(
     AxumPath(paper_id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> ApiResult<PaperDeleteResponse> {
-    Uuid::parse_str(&paper_id)
-        .map_err(|_| ApiError::bad_request(format!("invalid paper_id: {paper_id}")))?;
+    parse_uuid_param(&paper_id, "paper_id")?;
 
     let mut tx = state
         .pool
@@ -354,12 +325,9 @@ pub(crate) async fn delete_paper(
 pub(crate) async fn get_paper_detail(
     AxumPath(paper_id): AxumPath<String>,
     State(state): State<AppState>,
-) -> Result<Json<PaperDetail>, StatusCode> {
-    Uuid::parse_str(&paper_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    fetch_paper_detail(&state, &paper_id)
-        .await
-        .map(Json)
-        .map_err(map_paper_detail_status)
+) -> ApiResult<PaperDetail> {
+    parse_uuid_param(&paper_id, "paper_id")?;
+    Ok(Json(fetch_paper_detail(&state, &paper_id).await?))
 }
 
 async fn fetch_paper_detail(state: &AppState, paper_id: &str) -> Result<PaperDetail, ApiError> {
@@ -371,33 +339,7 @@ async fn fetch_paper_detail(state: &AppState, paper_id: &str) -> Result<PaperDet
     )
     .await
     .map(|loaded| loaded.detail)
-    .map_err(|err| {
-        let message = err.to_string();
-        if message.starts_with("paper not found:") {
-            ApiError::not_found(message)
-        } else {
-            ApiError::from(err)
-        }
-    })
-}
-
-async fn read_text_field(
-    field: axum::extract::multipart::Field<'_>,
-    field_name: &str,
-) -> Result<String, ApiError> {
-    field
-        .text()
-        .await
-        .map_err(|err| ApiError::bad_request(format!("read {field_name} field failed: {err}")))
-}
-
-async fn read_json_string_list_field(
-    field: axum::extract::multipart::Field<'_>,
-    field_name: &str,
-) -> Result<Vec<String>, ApiError> {
-    let text = read_text_field(field, field_name).await?;
-    serde_json::from_str::<Vec<String>>(&text)
-        .map_err(|err| ApiError::bad_request(format!("invalid {field_name} field: {err}")))
+    .map_err(ApiError::from)
 }
 
 fn validate_question_ids(question_ids: &[String]) -> Result<(), ApiError> {
@@ -412,47 +354,4 @@ fn validate_question_ids(question_ids: &[String]) -> Result<(), ApiError> {
             .map_err(|_| ApiError::bad_request(format!("invalid question_id: {question_id}")))?;
     }
     Ok(())
-}
-fn map_paper_detail_error(err: ApiError) -> ApiError {
-    if err.status == StatusCode::NOT_FOUND || err.status == StatusCode::BAD_REQUEST {
-        err
-    } else {
-        ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: err.message,
-        }
-    }
-}
-
-fn map_paper_detail_status(err: ApiError) -> StatusCode {
-    err.status
-}
-
-fn map_paper_create_error(err: anyhow::Error) -> ApiError {
-    let message = err.to_string();
-    if message.contains("uploaded file is empty")
-        || message.contains("uploaded zip exceeds")
-        || message.contains("open zip archive failed")
-    {
-        ApiError::bad_request(message)
-    } else {
-        ApiError::from(err)
-    }
-}
-
-fn map_paper_file_replace_error(err: anyhow::Error) -> ApiError {
-    let message = err.to_string();
-    if message.starts_with("paper not found:") {
-        ApiError {
-            status: StatusCode::NOT_FOUND,
-            message,
-        }
-    } else if message.contains("uploaded file is empty")
-        || message.contains("uploaded zip exceeds")
-        || message.contains("open zip archive failed")
-    {
-        ApiError::bad_request(message)
-    } else {
-        ApiError::from(err)
-    }
 }

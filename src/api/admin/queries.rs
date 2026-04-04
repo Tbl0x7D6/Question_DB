@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use sqlx::{query, PgPool, Postgres, QueryBuilder, Row};
 
 use super::models::{
@@ -7,23 +7,22 @@ use super::models::{
     AdminQuestionSummary, AdminQuestionsParams, GarbageCollectionResponse, RecordState,
 };
 use crate::api::{
-    papers::queries::ensure_paper_questions_valid,
+    papers::queries::{ensure_paper_questions_valid, map_paper_summary},
     questions::queries::{
-        load_question_difficulties, load_question_tags, map_paper_summary, map_question_summary,
+        load_question_difficulties_batch, load_question_tags_batch, map_question_summary,
     },
     shared::{
-        details::{load_paper_detail, load_question_detail, DetailVisibility},
-        error::ApiError,
+        details::{load_paper_detail, load_question_detail, DetailVisibility, TIMESTAMP_SQL},
+        error::{ConflictError, NotFoundError},
+        utils::escape_ilike,
     },
 };
-
-const TIMESTAMP_SQL: &str = "'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'";
 
 pub(crate) async fn list_admin_questions(
     pool: &PgPool,
     params: &AdminQuestionsParams,
     state: RecordState,
-) -> Result<Vec<AdminQuestionSummary>> {
+) -> Result<(Vec<AdminQuestionSummary>, i64)> {
     let mut builder = QueryBuilder::<Postgres>::new(&format!(
         "
         SELECT q.question_id::text AS question_id,
@@ -34,7 +33,8 @@ pub(crate) async fn list_admin_questions(
                to_char(q.created_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS created_at,
                to_char(q.updated_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS updated_at,
                to_char(q.deleted_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS deleted_at,
-               q.deleted_by
+               q.deleted_by,
+               COUNT(*) OVER() AS total_count
         FROM questions q
         WHERE 1 = 1"
     ));
@@ -75,7 +75,7 @@ pub(crate) async fn list_admin_questions(
             .push("::uuid)");
     }
     if let Some(search) = &params.q {
-        let needle = format!("%{search}%");
+        let needle = format!("%{}%", escape_ilike(search));
         builder
             .push(" AND COALESCE(q.description, '') ILIKE ")
             .push_bind(needle);
@@ -93,17 +93,25 @@ pub(crate) async fn list_admin_questions(
         .await
         .context("query admin questions failed")?;
 
+    let total = rows
+        .first()
+        .map(|r| r.get::<i64, _>("total_count"))
+        .unwrap_or(0);
+    let question_ids: Vec<String> = rows.iter().map(|r| r.get("question_id")).collect();
+    let tags_map = load_question_tags_batch(pool, &question_ids)
+        .await
+        .context("load admin question tags failed")?;
+    let difficulty_map = load_question_difficulties_batch(pool, &question_ids)
+        .await
+        .context("load admin question difficulties failed")?;
+
     let mut questions = Vec::with_capacity(rows.len());
     for row in rows {
         let question_id: String = row.get("question_id");
         let deleted_at: Option<String> = row.get("deleted_at");
         let deleted_by: Option<String> = row.get("deleted_by");
-        let tags = load_question_tags(pool, &question_id)
-            .await
-            .with_context(|| format!("load admin question tags failed: {question_id}"))?;
-        let difficulty = load_question_difficulties(pool, &question_id)
-            .await
-            .with_context(|| format!("load admin question difficulty failed: {question_id}"))?;
+        let tags = tags_map.get(&question_id).cloned().unwrap_or_default();
+        let difficulty = difficulty_map.get(&question_id).cloned().unwrap_or_default();
         questions.push(admin_question_summary(
             map_question_summary(row, tags, difficulty),
             deleted_at,
@@ -111,14 +119,14 @@ pub(crate) async fn list_admin_questions(
         ));
     }
 
-    Ok(questions)
+    Ok((questions, total))
 }
 
 pub(crate) async fn list_admin_papers(
     pool: &PgPool,
     params: &AdminPapersParams,
     state: RecordState,
-) -> Result<Vec<AdminPaperSummary>> {
+) -> Result<(Vec<AdminPaperSummary>, i64)> {
     let mut builder = QueryBuilder::<Postgres>::new(&format!(
         "
         SELECT p.paper_id::text AS paper_id,
@@ -164,7 +172,7 @@ pub(crate) async fn list_admin_papers(
             .push(')');
     }
     if let Some(search) = &params.q {
-        let needle = format!("%{search}%");
+        let needle = format!("%{}%", escape_ilike(search));
         builder
             .push(
                 " AND CONCAT_WS(' ', p.description, p.title, p.subtitle, array_to_string(p.authors, ' '), array_to_string(p.reviewers, ' ')) ILIKE ",
@@ -187,14 +195,20 @@ pub(crate) async fn list_admin_papers(
         .await
         .context("query admin papers failed")?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            let deleted_at: Option<String> = row.get("deleted_at");
-            let deleted_by: Option<String> = row.get("deleted_by");
-            admin_paper_summary(map_paper_summary(row), deleted_at, deleted_by)
-        })
-        .collect())
+    let total = count_admin_papers(pool, params, state)
+        .await
+        .context("count admin papers failed")?;
+
+    Ok((
+        rows.into_iter()
+            .map(|row| {
+                let deleted_at: Option<String> = row.get("deleted_at");
+                let deleted_by: Option<String> = row.get("deleted_by");
+                admin_paper_summary(map_paper_summary(row), deleted_at, deleted_by)
+            })
+            .collect(),
+        total,
+    ))
 }
 
 pub(crate) async fn load_admin_question_detail(
@@ -246,11 +260,11 @@ pub(crate) async fn restore_question(
         .fetch_optional(&mut *tx)
         .await
         .context("lock question row for restore failed")?
-        .ok_or_else(|| anyhow!("question not found: {question_id}"))?;
+        .ok_or_else(|| NotFoundError(format!("question not found: {question_id}")))?;
 
     let is_deleted: bool = row.get("is_deleted");
     if !is_deleted {
-        return Err(anyhow!("question is not deleted: {question_id}"));
+        return Err(ConflictError(format!("question is not deleted: {question_id}")).into());
     }
 
     query(
@@ -281,11 +295,11 @@ pub(crate) async fn restore_paper(pool: &PgPool, paper_id: &str) -> Result<Admin
         .fetch_optional(&mut *tx)
         .await
         .context("lock paper row for restore failed")?
-        .ok_or_else(|| anyhow!("paper not found: {paper_id}"))?;
+        .ok_or_else(|| NotFoundError(format!("paper not found: {paper_id}")))?;
 
     let is_deleted: bool = row.get("is_deleted");
     if !is_deleted {
-        return Err(anyhow!("paper is not deleted: {paper_id}"));
+        return Err(ConflictError(format!("paper is not deleted: {paper_id}")).into());
     }
 
     let question_ids = query(
@@ -299,9 +313,36 @@ pub(crate) async fn restore_paper(pool: &PgPool, paper_id: &str) -> Result<Admin
     .map(|row| row.get::<String, _>("question_id"))
     .collect::<Vec<_>>();
 
-    ensure_paper_questions_valid(&mut *tx, &question_ids)
-        .await
-        .map_err(|err| anyhow!("paper restore validation failed: {}", err.message))?;
+    // Check whether any referenced question has been soft-deleted — this is a
+    // state conflict rather than a validation error.
+    if !question_ids.is_empty() {
+        let mut qb = QueryBuilder::<Postgres>::new(
+            "SELECT question_id::text AS question_id FROM questions WHERE deleted_at IS NOT NULL AND question_id IN (",
+        );
+        for (idx, qid) in question_ids.iter().enumerate() {
+            if idx > 0 {
+                qb.push(", ");
+            }
+            qb.push_bind(qid).push("::uuid");
+        }
+        qb.push(")");
+        let deleted_rows = qb
+            .build()
+            .fetch_all(&mut *tx)
+            .await
+            .context("check deleted question refs failed")?;
+        if !deleted_rows.is_empty() {
+            let deleted_ids: Vec<String> =
+                deleted_rows.iter().map(|r| r.get("question_id")).collect();
+            return Err(ConflictError(format!(
+                "cannot restore paper: referenced questions are deleted: {}",
+                deleted_ids.join(", ")
+            ))
+            .into());
+        }
+    }
+
+    ensure_paper_questions_valid(&mut *tx, &question_ids).await?;
 
     query(
         "UPDATE papers SET deleted_at = NULL, deleted_by = NULL, updated_at = NOW() WHERE paper_id = $1::uuid",
@@ -423,16 +464,51 @@ fn push_paper_state_filter(builder: &mut QueryBuilder<'_, Postgres>, state: Reco
     }
 }
 
-pub(crate) fn map_admin_action_error(err: anyhow::Error) -> ApiError {
-    let message = err.to_string();
-    if message.starts_with("question not found:") || message.starts_with("paper not found:") {
-        ApiError::not_found(message)
-    } else if message.starts_with("question is not deleted:")
-        || message.starts_with("paper is not deleted:")
-        || message.starts_with("paper restore validation failed:")
-    {
-        ApiError::conflict(message)
-    } else {
-        ApiError::from(err)
+async fn count_admin_papers(
+    pool: &PgPool,
+    params: &AdminPapersParams,
+    state: RecordState,
+) -> Result<i64> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "SELECT COUNT(DISTINCT p.paper_id) AS total FROM papers p WHERE 1 = 1",
+    );
+    push_paper_state_filter(&mut builder, state);
+    if let Some(question_id) = &params.question_id {
+        builder
+            .push(
+                " AND EXISTS (SELECT 1 FROM paper_questions pq WHERE pq.paper_id = p.paper_id AND pq.question_id = ",
+            )
+            .push_bind(question_id)
+            .push("::uuid)");
     }
+    if let Some(category) = &params.category {
+        builder
+            .push(
+                " AND EXISTS (SELECT 1 FROM paper_questions pq JOIN questions q ON q.question_id = pq.question_id WHERE pq.paper_id = p.paper_id AND q.category = ",
+            )
+            .push_bind(category)
+            .push(')');
+    }
+    if let Some(tag) = &params.tag {
+        builder
+            .push(
+                " AND EXISTS (SELECT 1 FROM paper_questions pq JOIN question_tags qt ON qt.question_id = pq.question_id WHERE pq.paper_id = p.paper_id AND qt.tag = ",
+            )
+            .push_bind(tag)
+            .push(')');
+    }
+    if let Some(search) = &params.q {
+        let needle = format!("%{}%", escape_ilike(search));
+        builder
+            .push(
+                " AND CONCAT_WS(' ', p.description, p.title, p.subtitle, array_to_string(p.authors, ' '), array_to_string(p.reviewers, ' ')) ILIKE ",
+            )
+            .push_bind(needle);
+    }
+    let row = builder
+        .build()
+        .fetch_one(pool)
+        .await
+        .context("count admin papers failed")?;
+    Ok(row.get("total"))
 }

@@ -26,10 +26,21 @@
 - `difficulty_min`
 - `difficulty_max`
 - `q`
-- `limit`
-- `offset`
+- `limit`（默认 20，最大 100）
+- `offset`（默认 0）
 
-返回值会在普通题目摘要字段之外追加：
+响应格式（分页包裹）：
+
+```json
+{
+  "items": [ ... ],
+  "total": 100,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+`items` 中每个元素在普通题目摘要字段之外追加：
 
 - `deleted_at`
 - `deleted_by`
@@ -67,10 +78,21 @@
 - `category`
 - `tag`
 - `q`
-- `limit`
-- `offset`
+- `limit`（默认 20，最大 100）
+- `offset`（默认 0）
 
-返回值会在普通试卷摘要字段之外追加：
+响应格式（分页包裹）：
+
+```json
+{
+  "items": [ ... ],
+  "total": 12,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+`items` 中每个元素在普通试卷摘要字段之外追加：
 
 - `deleted_at`
 - `deleted_by`

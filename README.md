@@ -26,18 +26,25 @@ src/
 │   ├── papers/
 │   │   ├── API.md
 │   │   ├── handlers.rs
-│   │   └── models.rs
+│   │   ├── imports.rs
+│   │   ├── models.rs
+│   │   └── queries.rs
 │   ├── ops/
 │   │   ├── API.md
+│   │   ├── bundles.rs
 │   │   ├── exports.rs
 │   │   ├── handlers.rs
 │   │   ├── models.rs
+│   │   ├── paper_render.rs
 │   │   └── quality.rs
 │   ├── system/
 │   │   ├── API.md
 │   │   └── handlers.rs
 │   └── shared/
+│       ├── details.rs
 │       ├── error.rs
+│       ├── multipart.rs
+│       ├── mod.rs
 │       └── utils.rs
 ├── config.rs
 ├── db.rs
@@ -279,6 +286,9 @@ curl -X POST http://127.0.0.1:8080/papers \
 ```bash
 export QB_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/qb'
 export QB_BIND_ADDR='127.0.0.1:8080'
+export QB_EXPORT_DIR='./exports'            # 导出文件根目录（默认 ./exports）
+# export QB_MAX_DB_CONNECTIONS=10           # 可选，连接池上限
+# export QB_CORS_ORIGINS='http://localhost:3000,http://localhost:5173'  # 可选，CORS 白名单
 psql "$QB_DATABASE_URL" -f migrations/0001_init_pg.sql
 cargo run
 ```

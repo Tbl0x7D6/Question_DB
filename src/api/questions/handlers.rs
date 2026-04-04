@@ -1,21 +1,19 @@
 use anyhow::Context;
 use axum::{
     extract::{Multipart, Path as AxumPath, Query, State},
-    http::StatusCode,
     Json,
 };
 use sqlx::{query, Row};
-use uuid::Uuid;
 
 use super::{
     imports::{import_question_zip, replace_question_zip, MAX_UPLOAD_BYTES},
     models::{
-        CreateQuestionRequest, QuestionDeleteResponse, QuestionDetail, QuestionDifficulty,
-        QuestionFileReplaceResponse, QuestionImportResponse, QuestionSummary, QuestionsParams,
-        UpdateQuestionMetadataRequest,
+        CreateQuestionRequest, QuestionDeleteResponse, QuestionDetail,
+        QuestionDifficulty, QuestionFileReplaceResponse, QuestionImportResponse, QuestionSummary,
+        QuestionsParams, UpdateQuestionMetadataRequest,
     },
     queries::{
-        execute_questions_query, load_question_difficulties, load_question_tags,
+        execute_questions_query, load_question_difficulties_batch, load_question_tags_batch,
         map_question_summary, validate_question_filters,
     },
 };
@@ -23,6 +21,11 @@ use crate::api::{
     shared::{
         details::{load_question_detail, DetailVisibility},
         error::{ApiError, ApiResult},
+        multipart::{
+            next_multipart_field, parse_uuid_param, read_file_field, read_json_field,
+            read_text_field, read_uploaded_file, validate_upload_size,
+        },
+        pagination::Paginated,
     },
     AppState,
 };
@@ -30,37 +33,58 @@ use crate::api::{
 pub(crate) async fn list_questions(
     Query(params): Query<QuestionsParams>,
     State(state): State<AppState>,
-) -> Result<Json<Vec<QuestionSummary>>, StatusCode> {
-    validate_question_filters(&params).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let plan = params.build_query();
-    let rows = execute_questions_query(&state.pool, &params, &plan)
+) -> ApiResult<Paginated<QuestionSummary>> {
+    validate_question_filters(&params)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let mut plan = params.build_query();
+    let limit = plan.limit;
+    let offset = plan.offset;
+    let rows = execute_questions_query(&state.pool, &mut plan)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .context("query questions failed")
+        .map_err(ApiError::from)?;
 
-    let mut questions = Vec::with_capacity(rows.len());
-    for row in rows {
-        let question_id: String = row.get("question_id");
-        let tags = load_question_tags(&state.pool, &question_id)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let difficulty = load_question_difficulties(&state.pool, &question_id)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        questions.push(map_question_summary(row, tags, difficulty));
-    }
+    let total = rows
+        .first()
+        .map(|r| r.get::<i64, _>("total_count"))
+        .unwrap_or(0);
+    let question_ids: Vec<String> = rows.iter().map(|r| r.get("question_id")).collect();
+    let tags_map = load_question_tags_batch(&state.pool, &question_ids)
+        .await
+        .context("load question tags failed")
+        .map_err(ApiError::from)?;
+    let difficulty_map = load_question_difficulties_batch(&state.pool, &question_ids)
+        .await
+        .context("load question difficulties failed")
+        .map_err(ApiError::from)?;
 
-    Ok(Json(questions))
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            let qid: String = row.get("question_id");
+            let tags = tags_map.get(&qid).cloned().unwrap_or_default();
+            let difficulty = difficulty_map
+                .get(&qid)
+                .cloned()
+                .unwrap_or_default();
+            map_question_summary(row, tags, difficulty)
+        })
+        .collect();
+
+    Ok(Json(Paginated {
+        items,
+        total,
+        limit,
+        offset,
+    }))
 }
 
 pub(crate) async fn get_question_detail(
     AxumPath(question_id): AxumPath<String>,
     State(state): State<AppState>,
-) -> Result<Json<QuestionDetail>, StatusCode> {
-    Uuid::parse_str(&question_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-    fetch_question_detail(&state, &question_id)
-        .await
-        .map(Json)
-        .map_err(map_question_detail_error)
+) -> ApiResult<QuestionDetail> {
+    parse_uuid_param(&question_id, "question_id")?;
+    Ok(Json(fetch_question_detail(&state, &question_id).await?))
 }
 
 pub(crate) async fn create_question(
@@ -75,24 +99,15 @@ pub(crate) async fn create_question(
     let mut difficulty = None;
     let mut bytes = Vec::new();
 
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| ApiError::bad_request(format!("read multipart field failed: {err}")))?
-    {
+    while let Some(field) = next_multipart_field(&mut multipart).await? {
         let Some(name) = field.name() else {
             continue;
         };
         match name {
             "file" => {
-                file_name = field.file_name().map(str::to_string);
-                bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|err| {
-                        ApiError::bad_request(format!("read uploaded file failed: {err}"))
-                    })?
-                    .to_vec();
+                let (fname, data) = read_file_field(field).await?;
+                file_name = fname;
+                bytes = data;
             }
             "description" => {
                 description = Some(read_text_field(field, "description").await?);
@@ -101,23 +116,19 @@ pub(crate) async fn create_question(
                 category = Some(read_text_field(field, "category").await?);
             }
             "tags" => {
-                tags = Some(read_json_string_list_field(field, "tags").await?);
+                tags = Some(read_json_field(field, "tags").await?);
             }
             "status" => {
                 status = Some(read_text_field(field, "status").await?);
             }
             "difficulty" => {
-                difficulty = Some(read_question_difficulty_field(field).await?);
+                difficulty = Some(read_json_field::<QuestionDifficulty>(field, "difficulty").await?);
             }
             _ => {}
         }
     }
 
-    if bytes.is_empty() {
-        return Err(ApiError::bad_request(
-            "multipart form must include a non-empty 'file' field",
-        ));
-    }
+    validate_upload_size(&bytes, MAX_UPLOAD_BYTES)?;
     let request = CreateQuestionRequest {
         description: description.ok_or_else(|| {
             ApiError::bad_request("multipart form must include a non-empty 'description' field")
@@ -131,9 +142,6 @@ pub(crate) async fn create_question(
     }
     .normalize()
     .map_err(|err| ApiError::bad_request(err.to_string()))?;
-    if bytes.len() > MAX_UPLOAD_BYTES {
-        return Err(ApiError::bad_request("uploaded zip exceeds 20 MiB limit"));
-    }
 
     Ok(Json(
         import_question_zip(&state.pool, file_name.as_deref(), &request, bytes)
@@ -147,23 +155,15 @@ pub(crate) async fn replace_question_file(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> ApiResult<QuestionFileReplaceResponse> {
-    Uuid::parse_str(&question_id)
-        .map_err(|_| ApiError::bad_request(format!("invalid question_id: {question_id}")))?;
+    parse_uuid_param(&question_id, "question_id")?;
 
-    let (file_name, bytes) = read_uploaded_file_from_multipart(&mut multipart).await?;
-    if bytes.is_empty() {
-        return Err(ApiError::bad_request(
-            "multipart form must include a non-empty 'file' field",
-        ));
-    }
-    if bytes.len() > MAX_UPLOAD_BYTES {
-        return Err(ApiError::bad_request("uploaded zip exceeds 20 MiB limit"));
-    }
+    let (file_name, bytes) = read_uploaded_file(&mut multipart).await?;
+    validate_upload_size(&bytes, MAX_UPLOAD_BYTES)?;
 
     Ok(Json(
         replace_question_zip(&state.pool, &question_id, file_name.as_deref(), bytes)
             .await
-            .map_err(map_question_file_replace_error)?,
+            .map_err(ApiError::from)?,
     ))
 }
 
@@ -172,8 +172,7 @@ pub(crate) async fn update_question_metadata(
     State(state): State<AppState>,
     Json(request): Json<UpdateQuestionMetadataRequest>,
 ) -> ApiResult<QuestionDetail> {
-    Uuid::parse_str(&question_id)
-        .map_err(|_| ApiError::bad_request(format!("invalid question_id: {question_id}")))?;
+    parse_uuid_param(&question_id, "question_id")?;
     let update = request
         .normalize()
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
@@ -286,21 +285,14 @@ pub(crate) async fn update_question_metadata(
         .await
         .context("commit question metadata update failed")?;
 
-    fetch_question_detail(&state, &question_id)
-        .await
-        .map(Json)
-        .map_err(|err| ApiError {
-            status: map_question_detail_error(err),
-            message: "load updated question detail failed".to_string(),
-        })
+    Ok(Json(fetch_question_detail(&state, &question_id).await?))
 }
 
 pub(crate) async fn delete_question(
     AxumPath(question_id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> ApiResult<QuestionDeleteResponse> {
-    Uuid::parse_str(&question_id)
-        .map_err(|_| ApiError::bad_request(format!("invalid question_id: {question_id}")))?;
+    parse_uuid_param(&question_id, "question_id")?;
 
     let mut tx = state
         .pool
@@ -361,7 +353,7 @@ pub(crate) async fn delete_question(
 async fn fetch_question_detail(
     state: &AppState,
     question_id: &str,
-) -> Result<QuestionDetail, anyhow::Error> {
+) -> Result<QuestionDetail, ApiError> {
     load_question_detail(
         &state.pool,
         question_id,
@@ -370,88 +362,6 @@ async fn fetch_question_detail(
     )
     .await
     .map(|loaded| loaded.detail)
+    .map_err(ApiError::from)
 }
 
-fn map_question_detail_error(err: anyhow::Error) -> StatusCode {
-    if err.to_string().starts_with("question not found:") {
-        StatusCode::NOT_FOUND
-    } else {
-        StatusCode::INTERNAL_SERVER_ERROR
-    }
-}
-
-async fn read_uploaded_file_from_multipart(
-    multipart: &mut Multipart,
-) -> Result<(Option<String>, Vec<u8>), ApiError> {
-    let mut file_name = None;
-    let mut bytes = Vec::new();
-
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|err| ApiError::bad_request(format!("read multipart field failed: {err}")))?
-    {
-        if field.name() != Some("file") {
-            continue;
-        }
-
-        file_name = field.file_name().map(str::to_string);
-        bytes = field
-            .bytes()
-            .await
-            .map_err(|err| ApiError::bad_request(format!("read uploaded file failed: {err}")))?
-            .to_vec();
-    }
-
-    Ok((file_name, bytes))
-}
-
-async fn read_text_field(
-    field: axum::extract::multipart::Field<'_>,
-    field_name: &str,
-) -> Result<String, ApiError> {
-    field
-        .text()
-        .await
-        .map_err(|err| ApiError::bad_request(format!("read {field_name} field failed: {err}")))
-}
-
-async fn read_json_string_list_field(
-    field: axum::extract::multipart::Field<'_>,
-    field_name: &str,
-) -> Result<Vec<String>, ApiError> {
-    let text = read_text_field(field, field_name).await?;
-    serde_json::from_str::<Vec<String>>(&text)
-        .map_err(|err| ApiError::bad_request(format!("invalid {field_name} field: {err}")))
-}
-
-async fn read_question_difficulty_field(
-    field: axum::extract::multipart::Field<'_>,
-) -> Result<QuestionDifficulty, ApiError> {
-    let text = read_text_field(field, "difficulty").await?;
-    serde_json::from_str::<QuestionDifficulty>(&text)
-        .map_err(|err| ApiError::bad_request(format!("invalid difficulty field: {err}")))
-}
-
-fn map_question_file_replace_error(err: anyhow::Error) -> ApiError {
-    let message = err.to_string();
-    if message.starts_with("question not found:") {
-        ApiError {
-            status: StatusCode::NOT_FOUND,
-            message,
-        }
-    } else if message.contains("uploaded file is empty")
-        || message.contains("uploaded zip exceeds")
-        || message.contains("open zip archive failed")
-        || message.contains("zip expands beyond the allowed uncompressed size")
-        || message.contains("zip entry")
-        || message.contains("zip root")
-        || message.contains("unsafe path")
-        || message.contains("all non-root files must be inside")
-        || message.contains("unexpected file")
-    {
-        ApiError::bad_request(message)
-    } else {
-        ApiError::from(err)
-    }
-}

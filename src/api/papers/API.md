@@ -48,8 +48,19 @@ curl -X POST http://127.0.0.1:8080/papers \
 - `tag`
 - `q`
   关键词会模糊匹配 `description`、`title`、`subtitle`、`authors`、`reviewers`
-- `limit`
-- `offset`
+- `limit`（默认 20，最大 100）
+- `offset`（默认 0）
+
+响应格式（分页包裹）：
+
+```json
+{
+  "items": [ ... ],
+  "total": 12,
+  "limit": 20,
+  "offset": 0
+}
+```
 
 ### `GET /papers/{paper_id}`
 

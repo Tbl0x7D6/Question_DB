@@ -1,25 +1,8 @@
 //! Shared low-level filesystem helpers.
 
-use std::{
-    env,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
-
-pub(crate) fn expand_path(input: &str) -> PathBuf {
-    if input == "~" {
-        if let Some(home) = env::var_os("HOME") {
-            return PathBuf::from(home);
-        }
-    }
-    if let Some(stripped) = input.strip_prefix("~/") {
-        if let Some(home) = env::var_os("HOME") {
-            return PathBuf::from(home).join(stripped);
-        }
-    }
-    PathBuf::from(input)
-}
 
 pub(crate) fn canonical_or_original(path: &Path) -> String {
     path.canonicalize()
@@ -79,9 +62,53 @@ fn validate_bundle_description(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Escape SQL ILIKE special characters (`%`, `_`, `\`) so they match literally.
+pub(crate) fn escape_ilike(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '%' | '_' | '\\' => {
+                result.push('\\');
+                result.push(ch);
+            }
+            _ => result.push(ch),
+        }
+    }
+    result
+}
+
+/// Resolve an optional user-provided export path to an absolute path inside
+/// `export_dir`.  Absolute paths and `..` components are rejected.
+pub(crate) fn resolve_export_path(
+    user_path: Option<&str>,
+    default: PathBuf,
+    export_dir: &Path,
+) -> Result<PathBuf> {
+    let relative = match user_path {
+        Some(p) => {
+            let candidate = Path::new(p);
+            if candidate.is_absolute() {
+                bail!("output_path must be a relative path");
+            }
+            for component in candidate.components() {
+                if matches!(component, std::path::Component::ParentDir) {
+                    bail!("output_path must not contain '..'");
+                }
+            }
+            PathBuf::from(p)
+        }
+        None => default,
+    };
+    Ok(export_dir.join(relative))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{bundle_directory_name, normalize_bundle_description};
+    use std::path::{Path, PathBuf};
+
+    use super::{
+        bundle_directory_name, escape_ilike, normalize_bundle_description, resolve_export_path,
+    };
 
     #[test]
     fn normalize_bundle_description_accepts_chinese() {
@@ -100,5 +127,46 @@ mod tests {
     fn bundle_directory_name_appends_id_suffix() {
         let directory = bundle_directory_name("热学决赛卷", "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(directory, "热学决赛卷_550e84");
+    }
+
+    #[test]
+    fn escape_ilike_escapes_special_characters() {
+        assert_eq!(escape_ilike("100%"), r"100\%");
+        assert_eq!(escape_ilike("a_b"), r"a\_b");
+        assert_eq!(escape_ilike(r"c\d"), r"c\\d");
+        assert_eq!(escape_ilike("hello"), "hello");
+        assert_eq!(escape_ilike("%_\\"), r"\%\_\\");
+    }
+
+    #[test]
+    fn resolve_export_path_joins_relative() {
+        let dir = Path::new("/data/exports");
+        let result = resolve_export_path(Some("out.jsonl"), PathBuf::from("default.jsonl"), dir)
+            .expect("should succeed");
+        assert_eq!(result, PathBuf::from("/data/exports/out.jsonl"));
+    }
+
+    #[test]
+    fn resolve_export_path_uses_default_when_none() {
+        let dir = Path::new("/data/exports");
+        let result =
+            resolve_export_path(None, PathBuf::from("default.jsonl"), dir).expect("should succeed");
+        assert_eq!(result, PathBuf::from("/data/exports/default.jsonl"));
+    }
+
+    #[test]
+    fn resolve_export_path_rejects_absolute_path() {
+        let dir = Path::new("/data/exports");
+        let err = resolve_export_path(Some("/etc/passwd"), PathBuf::from("d.jsonl"), dir)
+            .expect_err("should fail");
+        assert!(err.to_string().contains("relative path"));
+    }
+
+    #[test]
+    fn resolve_export_path_rejects_parent_dir() {
+        let dir = Path::new("/data/exports");
+        let err = resolve_export_path(Some("../secret.json"), PathBuf::from("d.jsonl"), dir)
+            .expect_err("should fail");
+        assert!(err.to_string().contains(".."));
     }
 }

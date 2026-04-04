@@ -1,18 +1,23 @@
 use anyhow::{anyhow, Context, Result};
 use sqlx::{query, PgPool, Row};
 
+use super::error::NotFoundError;
+
 use crate::api::{
-    papers::models::PaperDetail,
+    papers::{
+        models::PaperDetail,
+        queries::{map_paper_detail, map_paper_question_summary},
+    },
     questions::{
         models::{QuestionDetail, QuestionPaperRef},
         queries::{
-            load_question_difficulties, load_question_files, load_question_tags, map_paper_detail,
-            map_paper_question_summary, map_question_detail, map_question_paper_ref,
+            load_question_difficulties, load_question_files, load_question_tags,
+            map_question_detail, map_question_paper_ref,
         },
     },
 };
 
-const TIMESTAMP_SQL: &str = "'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'";
+pub(crate) const TIMESTAMP_SQL: &str = "'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DetailVisibility {
@@ -59,7 +64,7 @@ pub(crate) async fn load_question_detail(
     .fetch_optional(pool)
     .await
     .with_context(|| format!("load question detail failed: {question_id}"))?
-    .ok_or_else(|| anyhow!("question not found: {question_id}"))?;
+    .ok_or_else(|| NotFoundError(format!("question not found: {question_id}")))?;
 
     let deleted_at: Option<String> = row.get("deleted_at");
     let deleted_by: Option<String> = row.get("deleted_by");
@@ -128,7 +133,7 @@ pub(crate) async fn load_paper_detail(
     .fetch_optional(pool)
     .await
     .with_context(|| format!("load paper detail failed: {paper_id}"))?
-    .ok_or_else(|| anyhow!("paper not found: {paper_id}"))?;
+    .ok_or_else(|| NotFoundError(format!("paper not found: {paper_id}")))?;
 
     let deleted_at: Option<String> = paper_row.get("deleted_at");
     let deleted_by: Option<String> = paper_row.get("deleted_by");

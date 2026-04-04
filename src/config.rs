@@ -1,6 +1,6 @@
 //! Runtime configuration loaded from environment variables.
 
-use std::{env, net::SocketAddr};
+use std::{env, net::SocketAddr, path::PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -8,6 +8,9 @@ use anyhow::{Context, Result};
 pub struct AppConfig {
     pub database_url: String,
     pub bind_addr: SocketAddr,
+    pub max_db_connections: u32,
+    pub export_dir: PathBuf,
+    pub cors_origins: Vec<String>,
 }
 
 impl AppConfig {
@@ -20,9 +23,28 @@ impl AppConfig {
             .parse()
             .context("QB_BIND_ADDR must be a valid socket address, e.g. 127.0.0.1:8080")?;
 
+        let max_db_connections = env::var("QB_MAX_DB_CONNECTIONS")
+            .unwrap_or_else(|_| "10".to_string())
+            .parse()
+            .context("QB_MAX_DB_CONNECTIONS must be a positive integer")?;
+
+        let export_dir = env::var("QB_EXPORT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("exports"));
+
+        let cors_origins = env::var("QB_CORS_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+
         Ok(Self {
             database_url,
             bind_addr,
+            max_db_connections,
+            export_dir,
+            cors_origins,
         })
     }
 }
@@ -30,44 +52,26 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
+    use serial_test::serial;
     use std::env;
 
-    /// Guard that restores a single environment variable to its prior state on drop.
-    struct EnvVarGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let prev = env::var(key).ok();
-            env::set_var(key, value);
-            EnvVarGuard { key, prev }
-        }
-
-        fn remove(key: &'static str) -> Self {
-            let prev = env::var(key).ok();
-            env::remove_var(key);
-            EnvVarGuard { key, prev }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(val) => env::set_var(self.key, val),
-                None => env::remove_var(self.key),
-            }
-        }
-    }
-
     #[test]
+    #[serial]
     fn config_reads_env_and_uses_default_bind_addr() {
-        let _db_guard = EnvVarGuard::set(
+        let prev_db = env::var("QB_DATABASE_URL").ok();
+        let prev_bind = env::var("QB_BIND_ADDR").ok();
+        let prev_conn = env::var("QB_MAX_DB_CONNECTIONS").ok();
+        let prev_export = env::var("QB_EXPORT_DIR").ok();
+        let prev_cors = env::var("QB_CORS_ORIGINS").ok();
+
+        env::set_var(
             "QB_DATABASE_URL",
             "postgres://postgres:postgres@localhost/qb",
         );
-        let _bind_guard = EnvVarGuard::remove("QB_BIND_ADDR");
+        env::remove_var("QB_BIND_ADDR");
+        env::remove_var("QB_MAX_DB_CONNECTIONS");
+        env::remove_var("QB_EXPORT_DIR");
+        env::remove_var("QB_CORS_ORIGINS");
 
         let cfg = AppConfig::from_env().expect("config should load");
         assert_eq!(cfg.bind_addr.to_string(), "127.0.0.1:8080");
@@ -75,5 +79,30 @@ mod tests {
             cfg.database_url,
             "postgres://postgres:postgres@localhost/qb"
         );
+        assert_eq!(cfg.max_db_connections, 10);
+        assert_eq!(cfg.export_dir.to_str().unwrap(), "exports");
+        assert!(cfg.cors_origins.is_empty());
+
+        // Restore
+        match prev_db {
+            Some(v) => env::set_var("QB_DATABASE_URL", v),
+            None => env::remove_var("QB_DATABASE_URL"),
+        }
+        match prev_bind {
+            Some(v) => env::set_var("QB_BIND_ADDR", v),
+            None => {}
+        }
+        match prev_conn {
+            Some(v) => env::set_var("QB_MAX_DB_CONNECTIONS", v),
+            None => {}
+        }
+        match prev_export {
+            Some(v) => env::set_var("QB_EXPORT_DIR", v),
+            None => {}
+        }
+        match prev_cors {
+            Some(v) => env::set_var("QB_CORS_ORIGINS", v),
+            None => {}
+        }
     }
 }

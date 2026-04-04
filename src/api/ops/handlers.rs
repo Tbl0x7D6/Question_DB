@@ -16,7 +16,7 @@ use super::{
 use crate::api::{
     shared::{
         error::{ApiError, ApiResult},
-        utils::{canonical_or_original, expand_path},
+        utils::{canonical_or_original, resolve_export_path},
     },
     AppState,
 };
@@ -30,7 +30,7 @@ pub(crate) async fn download_questions_bundle(
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
     build_question_bundle_response(&state.pool, &question_ids)
         .await
-        .map_err(map_bundle_error)
+        .map_err(ApiError::from)
 }
 
 pub(crate) async fn download_papers_bundle(
@@ -42,18 +42,19 @@ pub(crate) async fn download_papers_bundle(
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
     build_paper_bundle_response(&state.pool, &paper_ids)
         .await
-        .map_err(map_bundle_error)
+        .map_err(ApiError::from)
 }
 
 pub(crate) async fn run_export(
     State(state): State<AppState>,
     Json(request): Json<ExportRequest>,
 ) -> ApiResult<ExportResponse> {
-    let output_path = request
-        .output_path
-        .as_deref()
-        .map(expand_path)
-        .unwrap_or_else(|| default_export_path(request.format, request.public));
+    let output_path = resolve_export_path(
+        request.output_path.as_deref(),
+        default_export_path(request.format, request.public),
+        &state.export_dir,
+    )
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
     ensure_parent_dir(&output_path, "export")?;
 
     let exported_count = match request.format {
@@ -76,11 +77,12 @@ pub(crate) async fn run_quality_check(
     State(state): State<AppState>,
     Json(request): Json<QualityCheckRequest>,
 ) -> ApiResult<serde_json::Value> {
-    let output_path = request
-        .output_path
-        .as_deref()
-        .map(expand_path)
-        .unwrap_or_else(|| std::path::PathBuf::from("exports/quality_report.json"));
+    let output_path = resolve_export_path(
+        request.output_path.as_deref(),
+        std::path::PathBuf::from("quality_report.json"),
+        &state.export_dir,
+    )
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let report = build_quality_report(&state.pool).await?;
     ensure_parent_dir(&output_path, "quality report")?;
@@ -97,21 +99,4 @@ pub(crate) async fn run_quality_check(
         "output_path": canonical_or_original(Path::new(&output_path)),
         "report": report,
     })))
-}
-
-fn map_bundle_error(err: anyhow::Error) -> ApiError {
-    let message = err.to_string();
-    if message.starts_with("question not found:")
-        || message.starts_with("paper not found:")
-        || message.starts_with("question_ids")
-        || message.starts_with("paper_ids")
-        || message.starts_with("invalid question_ids entry:")
-        || message.starts_with("invalid paper_ids entry:")
-        || message.starts_with("duplicate question_ids entry:")
-        || message.starts_with("duplicate paper_ids entry:")
-    {
-        ApiError::bad_request(message)
-    } else {
-        ApiError::internal(message)
-    }
 }

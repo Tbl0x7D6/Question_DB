@@ -17,7 +17,10 @@ use crate::api::{
         models::QuestionSourceRef,
         queries::{load_question_difficulties, load_question_files, load_question_tags},
     },
-    shared::utils::canonical_or_original,
+    shared::{
+        db::fetch_text_object,
+        utils::canonical_or_original,
+    },
 };
 
 pub(crate) fn default_export_path(format: ExportFormat, is_public: bool) -> PathBuf {
@@ -39,17 +42,6 @@ pub(crate) fn ensure_parent_dir(output_path: &Path, label: &str) -> Result<()> {
         })?;
     }
     Ok(())
-}
-
-pub(crate) async fn fetch_text_object(pool: &PgPool, object_id: &str) -> Result<String> {
-    let row = query("SELECT content FROM objects WHERE object_id = $1::uuid")
-        .bind(object_id)
-        .fetch_one(pool)
-        .await
-        .with_context(|| format!("query object failed: {object_id}"))?;
-
-    let content: Vec<u8> = row.get("content");
-    Ok(String::from_utf8_lossy(&content).to_string())
 }
 
 pub(crate) async fn export_jsonl(

@@ -140,13 +140,24 @@
 - `difficulty_max`
 - `q`
   关键词搜索，只会匹配 `description`
-- `limit`
-- `offset`
+- `limit`（默认 20，最大 100）
+- `offset`（默认 0）
 
 说明：
 
 - `difficulty_min` / `difficulty_max` 需要和 `difficulty_tag` 一起使用
 - difficulty 过滤会匹配指定 tag 上的 score 范围
+
+响应格式（分页包裹）：
+
+```json
+{
+  "items": [ ... ],
+  "total": 42,
+  "limit": 20,
+  "offset": 0
+}
+```
 
 ### `GET /questions/{question_id}`
 

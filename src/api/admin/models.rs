@@ -7,6 +7,7 @@ use crate::api::{
         models::{QuestionDetail, QuestionSummary, QuestionsParams},
         queries::validate_question_filters,
     },
+    shared::pagination::{normalize_limit, normalize_offset},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,11 +93,11 @@ pub(crate) struct GarbageCollectionResponse {
 
 impl AdminQuestionsParams {
     pub(crate) fn normalized_limit(&self) -> i64 {
-        self.limit.unwrap_or(20).clamp(1, 100)
+        normalize_limit(self.limit)
     }
 
     pub(crate) fn normalized_offset(&self) -> i64 {
-        self.offset.unwrap_or(0).max(0)
+        normalize_offset(self.offset)
     }
 
     pub(crate) fn state(&self) -> Result<RecordState> {
@@ -126,11 +127,11 @@ impl AdminQuestionsParams {
 
 impl AdminPapersParams {
     pub(crate) fn normalized_limit(&self) -> i64 {
-        self.limit.unwrap_or(20).clamp(1, 100)
+        normalize_limit(self.limit)
     }
 
     pub(crate) fn normalized_offset(&self) -> i64 {
-        self.offset.unwrap_or(0).max(0)
+        normalize_offset(self.offset)
     }
 
     pub(crate) fn state(&self) -> Result<RecordState> {
