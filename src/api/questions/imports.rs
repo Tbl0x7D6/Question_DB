@@ -49,8 +49,7 @@ pub(crate) async fn import_question_zip(
         return Err(ValidationError("uploaded zip exceeds 20 MiB limit".into()).into());
     }
 
-    let loaded = load_question_zip(&zip_bytes)
-        .map_err(|e| ValidationError(format!("{e:#}")))?;
+    let loaded = load_question_zip(&zip_bytes).map_err(|e| ValidationError(format!("{e:#}")))?;
     let question_id = Uuid::new_v4().to_string();
     let mut tx = pool
         .begin()
@@ -60,10 +59,10 @@ pub(crate) async fn import_question_zip(
     query(
         r#"
         INSERT INTO questions (
-            question_id, source_tex_path, category, status, description, created_at, updated_at
+            question_id, source_tex_path, category, status, description, author, reviewers, created_at, updated_at
         )
         VALUES (
-            $1::uuid, $2, $3, $4, $5, NOW(), NOW()
+            $1::uuid, $2, $3, $4, $5, $6, $7, NOW(), NOW()
         )
         "#,
     )
@@ -72,6 +71,8 @@ pub(crate) async fn import_question_zip(
     .bind(&request.category)
     .bind(&request.status)
     .bind(&request.description)
+    .bind(&request.author)
+    .bind(&request.reviewers)
     .execute(&mut *tx)
     .await
     .context("insert uploaded question failed")?;
@@ -103,8 +104,7 @@ pub(crate) async fn replace_question_zip(
         return Err(ValidationError("uploaded zip exceeds 20 MiB limit".into()).into());
     }
 
-    let loaded = load_question_zip(&zip_bytes)
-        .map_err(|e| ValidationError(format!("{e:#}")))?;
+    let loaded = load_question_zip(&zip_bytes).map_err(|e| ValidationError(format!("{e:#}")))?;
     let normalized_file_name = normalize_upload_file_name(file_name, "question.zip");
     let mut tx = pool
         .begin()
@@ -314,8 +314,7 @@ async fn insert_loaded_question_files_tx(
         let mime = MimeGuess::from_path(&asset.path)
             .first_raw()
             .map(str::to_string);
-        let object_id =
-            insert_object_tx(tx, &asset.path, &asset.bytes, mime.as_deref()).await?;
+        let object_id = insert_object_tx(tx, &asset.path, &asset.bytes, mime.as_deref()).await?;
         insert_question_file_tx(
             tx,
             question_id,

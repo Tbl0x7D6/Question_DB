@@ -169,6 +169,8 @@ def _build_real_question_zips(
                     "description": f"{description_prefix} {source_dir.name}",
                     "tags": [*tag_prefixes, f"folder-{source_dir.name}"],
                     "status": status,
+                    "author": f"命题人{index}",
+                    "reviewers": [f"审题人{index}A", f"审题人{index}B"],
                     "difficulty": {
                         "human": {
                             "score": min(10, index + 4),

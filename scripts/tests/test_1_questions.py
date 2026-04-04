@@ -50,6 +50,8 @@ def upload_real_questions(
                 tags=f.patch["tags"],
                 status=f.patch["status"],
                 difficulty=f.patch["difficulty"],
+                author=f.patch.get("author"),
+                reviewers=f.patch.get("reviewers"),
             ),
             file_path=f.upload_path,
         )
@@ -159,6 +161,8 @@ def test_create_synthetic_questions(api, state):
                 tags=spec["patch"]["tags"],
                 status=spec["patch"]["status"],
                 difficulty=spec["patch"]["difficulty"],
+                author=spec["patch"].get("author"),
+                reviewers=spec["patch"].get("reviewers"),
             ),
             file_path=zp,
         )

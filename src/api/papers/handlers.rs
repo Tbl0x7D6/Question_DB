@@ -67,8 +67,6 @@ pub(crate) async fn create_paper(
     let mut description = None;
     let mut title = None;
     let mut subtitle = None;
-    let mut authors = None;
-    let mut reviewers = None;
     let mut question_ids = None;
     let mut bytes = Vec::new();
 
@@ -91,12 +89,6 @@ pub(crate) async fn create_paper(
             "subtitle" => {
                 subtitle = Some(read_text_field(field, "subtitle").await?);
             }
-            "authors" => {
-                authors = Some(read_json_field(field, "authors").await?);
-            }
-            "reviewers" => {
-                reviewers = Some(read_json_field(field, "reviewers").await?);
-            }
             "question_ids" => {
                 question_ids = Some(read_json_field(field, "question_ids").await?);
             }
@@ -115,12 +107,6 @@ pub(crate) async fn create_paper(
         })?,
         subtitle: subtitle.ok_or_else(|| {
             ApiError::bad_request("multipart form must include a non-empty 'subtitle' field")
-        })?,
-        authors: authors.ok_or_else(|| {
-            ApiError::bad_request("multipart form must include an 'authors' field")
-        })?,
-        reviewers: reviewers.ok_or_else(|| {
-            ApiError::bad_request("multipart form must include a 'reviewers' field")
         })?,
         question_ids: question_ids.ok_or_else(|| {
             ApiError::bad_request("multipart form must include a non-empty 'question_ids' field")
@@ -229,24 +215,6 @@ pub(crate) async fn update_paper(
             .execute(&mut *tx)
             .await
             .context("update paper subtitle failed")?;
-    }
-
-    if let Some(authors) = &update.authors {
-        query("UPDATE papers SET authors = $2, updated_at = NOW() WHERE paper_id = $1::uuid")
-            .bind(&paper_id)
-            .bind(authors)
-            .execute(&mut *tx)
-            .await
-            .context("update paper authors failed")?;
-    }
-
-    if let Some(reviewers) = &update.reviewers {
-        query("UPDATE papers SET reviewers = $2, updated_at = NOW() WHERE paper_id = $1::uuid")
-            .bind(&paper_id)
-            .bind(reviewers)
-            .execute(&mut *tx)
-            .await
-            .context("update paper reviewers failed")?;
     }
 
     if let Some(question_ids) = &update.question_ids {

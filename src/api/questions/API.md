@@ -23,6 +23,12 @@
   - 会去重；`[]` 表示创建时无标签
 - 可选字段：`status`
   - `none` | `reviewed` | `used`
+- 可选字段：`author`
+  - 命题人，字符串
+  - 默认空串
+- 可选字段：`reviewers`
+  - 审题人列表，传 JSON 字符串数组
+  - 会去重；默认 `[]`
 - 大小限制：20 MiB
 - zip 根目录必须包含且只包含：
   - 恰好一个 `.tex` 文件
@@ -31,6 +37,8 @@
   - `category = "none"`
   - `tags = []`
   - `status = "none"`
+  - `author = ""`
+  - `reviewers = []`
 - `created_at = NOW()`
 
 成功响应：
@@ -65,6 +73,8 @@
   - `notes` 可选；空串会规范化为 `null`
   - 如果传了 `difficulty`，会整体替换整组 difficulty
   - `difficulty` 必须至少包含 `human`
+- `author`: 命题人，字符串
+- `reviewers`: 审题人列表，字符串数组，会去重
 
 成功时返回更新后的完整题目详情。
 
@@ -85,6 +95,8 @@
 - 原有 metadata 会保留：
   - `category`
   - `description`
+  - `author`
+  - `reviewers`
   - `tags`
   - `status`
   - `difficulty`

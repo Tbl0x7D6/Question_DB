@@ -370,7 +370,7 @@ async fn load_paper_bundle_data(pool: &PgPool, paper_id: &str) -> Result<PaperBu
     let paper_row = query(
         r#"
         SELECT p.paper_id::text AS paper_id, p.description, p.title, p.subtitle,
-               p.authors, p.reviewers, p.append_object_id::text AS append_object_id,
+               p.append_object_id::text AS append_object_id,
                o.file_name AS append_file_name, o.mime_type AS append_mime_type,
                to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
@@ -458,11 +458,33 @@ async fn build_render_paper_input(
         });
     }
 
+    // Collect authors from questions in sort order, deduplicate preserving order.
+    let mut authors = Vec::new();
+    let mut seen_authors = std::collections::HashSet::new();
+    for question in &bundle.questions {
+        let author = question.metadata.author.trim();
+        if !author.is_empty() && seen_authors.insert(author.to_string()) {
+            authors.push(author.to_string());
+        }
+    }
+
+    // Collect reviewers from all questions, deduplicate preserving order.
+    let mut reviewers = Vec::new();
+    let mut seen_reviewers = std::collections::HashSet::new();
+    for question in &bundle.questions {
+        for reviewer in &question.metadata.reviewers {
+            let reviewer = reviewer.trim();
+            if !reviewer.is_empty() && seen_reviewers.insert(reviewer.to_string()) {
+                reviewers.push(reviewer.to_string());
+            }
+        }
+    }
+
     Ok(RenderPaperInput {
         title: bundle.metadata.title.clone(),
         subtitle: bundle.metadata.subtitle.clone(),
-        authors: bundle.metadata.authors.clone(),
-        reviewers: bundle.metadata.reviewers.clone(),
+        authors,
+        reviewers,
         template_kind,
         questions,
     })

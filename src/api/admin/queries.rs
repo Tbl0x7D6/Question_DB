@@ -30,6 +30,8 @@ pub(crate) async fn list_admin_questions(
                q.category,
                q.status,
                COALESCE(q.description, '') AS description,
+               q.author,
+               q.reviewers,
                to_char(q.created_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS created_at,
                to_char(q.updated_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS updated_at,
                to_char(q.deleted_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS deleted_at,
@@ -133,8 +135,6 @@ pub(crate) async fn list_admin_papers(
                p.description,
                p.title,
                p.subtitle,
-               p.authors,
-               p.reviewers,
                COUNT(pq_count.question_id) AS question_count,
                to_char(p.created_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS created_at,
                to_char(p.updated_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS updated_at,
@@ -175,14 +175,14 @@ pub(crate) async fn list_admin_papers(
         let needle = format!("%{}%", escape_ilike(search));
         builder
             .push(
-                " AND CONCAT_WS(' ', p.description, p.title, p.subtitle, array_to_string(p.authors, ' '), array_to_string(p.reviewers, ' ')) ILIKE ",
+                " AND CONCAT_WS(' ', p.description, p.title, p.subtitle) ILIKE ",
             )
             .push_bind(needle);
     }
 
     builder
         .push(
-            " GROUP BY p.paper_id, p.description, p.title, p.subtitle, p.authors, p.reviewers, p.created_at, p.updated_at, p.deleted_at, p.deleted_by",
+            " GROUP BY p.paper_id, p.description, p.title, p.subtitle, p.created_at, p.updated_at, p.deleted_at, p.deleted_by",
         )
         .push(" ORDER BY p.created_at DESC, p.paper_id LIMIT ")
         .push_bind(params.normalized_limit())
@@ -501,7 +501,7 @@ async fn count_admin_papers(
         let needle = format!("%{}%", escape_ilike(search));
         builder
             .push(
-                " AND CONCAT_WS(' ', p.description, p.title, p.subtitle, array_to_string(p.authors, ' '), array_to_string(p.reviewers, ' ')) ILIKE ",
+                " AND CONCAT_WS(' ', p.description, p.title, p.subtitle) ILIKE ",
             )
             .push_bind(needle);
     }

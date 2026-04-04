@@ -42,18 +42,16 @@ pub(crate) async fn import_paper_zip(
     query(
         r#"
         INSERT INTO papers (
-            paper_id, description, title, subtitle, authors, reviewers,
+            paper_id, description, title, subtitle,
             append_object_id, created_at, updated_at
         )
-        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::uuid, NOW(), NOW())
+        VALUES ($1::uuid, $2, $3, $4, $5::uuid, NOW(), NOW())
         "#,
     )
     .bind(&paper_id)
     .bind(&request.description)
     .bind(&request.title)
     .bind(&request.subtitle)
-    .bind(&request.authors)
-    .bind(&request.reviewers)
     .bind(&append_object_id)
     .execute(&mut *tx)
     .await
@@ -149,8 +147,7 @@ pub(crate) async fn replace_paper_zip(
 
 fn validate_uploaded_zip(zip_bytes: &[u8]) -> Result<()> {
     let cursor = Cursor::new(zip_bytes);
-    ZipArchive::new(cursor)
-        .map_err(|e| ValidationError(format!("invalid zip archive: {e}")))?;
+    ZipArchive::new(cursor).map_err(|e| ValidationError(format!("invalid zip archive: {e}")))?;
     Ok(())
 }
 

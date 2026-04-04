@@ -4,10 +4,7 @@ use anyhow::{Context, Result};
 use sqlx::{postgres::PgRow, PgPool, Postgres, QueryBuilder, Row};
 
 use super::models::{validate_paper_filters, PapersParams};
-use crate::api::shared::{
-    error::ValidationError,
-    utils::escape_ilike,
-};
+use crate::api::shared::{error::ValidationError, utils::escape_ilike};
 
 /// Returned from `build_query` with parameter bindings already attached.
 pub(crate) struct PapersQueryPlan<'a> {
@@ -24,8 +21,7 @@ impl PapersParams {
                    p.description,
                    p.title,
                    p.subtitle,
-                   p.authors,
-                   p.reviewers,
+
                    COUNT(pq_count.question_id) AS question_count,
                    to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at,
                    to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS updated_at
@@ -55,7 +51,7 @@ impl PapersParams {
         if let Some(search) = &self.q {
             let needle = format!("%{}%", escape_ilike(search));
             builder
-                .push(" AND CONCAT_WS(' ', p.description, p.title, p.subtitle, array_to_string(p.authors, ' '), array_to_string(p.reviewers, ' ')) ILIKE ")
+                .push(" AND CONCAT_WS(' ', p.description, p.title, p.subtitle) ILIKE ")
                 .push_bind(needle);
         }
 
@@ -63,7 +59,7 @@ impl PapersParams {
         let offset = self.normalized_offset();
         builder
             .push(
-                " GROUP BY p.paper_id, p.description, p.title, p.subtitle, p.authors, p.reviewers, p.created_at, p.updated_at",
+                " GROUP BY p.paper_id, p.description, p.title, p.subtitle, p.created_at, p.updated_at",
             )
             .push(" ORDER BY p.created_at DESC, p.paper_id LIMIT ")
             .push_bind(limit)
@@ -98,7 +94,9 @@ pub(crate) async fn count_papers(pool: &PgPool, params: &PapersParams) -> Result
     Ok(row.get("total"))
 }
 
-pub(crate) fn validate_and_build_papers_query(params: &PapersParams) -> Result<PapersQueryPlan<'_>> {
+pub(crate) fn validate_and_build_papers_query(
+    params: &PapersParams,
+) -> Result<PapersQueryPlan<'_>> {
     validate_paper_filters(params)?;
     Ok(params.build_query())
 }
@@ -109,8 +107,6 @@ pub(crate) fn map_paper_summary(row: PgRow) -> super::models::PaperSummary {
         description: row.get("description"),
         title: row.get("title"),
         subtitle: row.get("subtitle"),
-        authors: row.get("authors"),
-        reviewers: row.get("reviewers"),
         question_count: row.get("question_count"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -139,8 +135,6 @@ pub(crate) fn map_paper_detail(
         description: row.get("description"),
         title: row.get("title"),
         subtitle: row.get("subtitle"),
-        authors: row.get("authors"),
-        reviewers: row.get("reviewers"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         questions,
@@ -169,7 +163,7 @@ fn push_paper_filters<'a>(builder: &mut QueryBuilder<'a, Postgres>, params: &'a 
     if let Some(search) = &params.q {
         let needle = format!("%{}%", escape_ilike(search));
         builder
-            .push(" AND CONCAT_WS(' ', p.description, p.title, p.subtitle, array_to_string(p.authors, ' '), array_to_string(p.reviewers, ' ')) ILIKE ")
+            .push(" AND CONCAT_WS(' ', p.description, p.title, p.subtitle) ILIKE ")
             .push_bind(needle);
     }
 }
@@ -265,7 +259,8 @@ pub(crate) fn validate_paper_question_rows(
                 return Err(ValidationError(format!(
                     "paper questions must all have the same category; found both {expected} and {}",
                     row.category
-                )).into());
+                ))
+                .into());
             }
         } else {
             expected_category = Some(row.category.as_str());
@@ -275,7 +270,8 @@ pub(crate) fn validate_paper_question_rows(
             return Err(ValidationError(format!(
                 "question {} has status {}; paper questions must all have status reviewed or used",
                 row.question_id, row.status
-            )).into());
+            ))
+            .into());
         }
     }
 

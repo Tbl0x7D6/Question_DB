@@ -36,17 +36,14 @@ THEORY_CONFIG = PaperConfig(
     paper_a={
         "description": "真实理论联考 A", "title": "真实理论联考 A 卷",
         "subtitle": "回归测试 初版",
-        "authors": ["张三", "李四五"], "reviewers": ["王五", "赵六七"],
     },
     paper_b={
         "description": "真实理论联考 B", "title": "真实理论联考 B 卷",
         "subtitle": "六题完整版",
-        "authors": ["陈一", "孙二三"], "reviewers": ["周四", "吴五六"],
     },
     patched_a={
         "description": "真实理论联考 A（修订）", "title": "真实理论联考 A 卷（修订）",
         "subtitle": "回归测试 终版",
-        "authors": ["张三", "赵八九"], "reviewers": ["王五", "孙二"],
     },
     template_source="CPHOS-Latex/theory/examples/example-paper.tex",
     sample_problem_title="太阳物理初步",
@@ -57,17 +54,14 @@ EXPERIMENT_CONFIG = PaperConfig(
     paper_a={
         "description": "真实实验联考 A", "title": "真实实验联考 A 卷",
         "subtitle": "回归测试 初版",
-        "authors": ["钱二", "郑八九"], "reviewers": ["韩三", "卫四五"],
     },
     paper_b={
         "description": "真实实验联考 B", "title": "真实实验联考 B 卷",
         "subtitle": "四题完整版",
-        "authors": ["高一", "冯二三"], "reviewers": ["魏四", "沈五六"],
     },
     patched_a={
         "description": "真实实验联考 A（修订）", "title": "真实实验联考 A 卷（修订）",
         "subtitle": "回归测试 终版",
-        "authors": ["钱二", "齐一一"], "reviewers": ["韩三", "曹二"],
     },
     template_source="CPHOS-Latex/experiment/examples/example-paper.tex",
     sample_problem_title="弗兰克-赫兹实验",
@@ -82,8 +76,6 @@ def _paper_fields(meta: dict, question_ids: list[str]) -> dict[str, str]:
         "description": meta["description"],
         "title": meta["title"],
         "subtitle": meta["subtitle"],
-        "authors": json.dumps(meta["authors"], ensure_ascii=False),
-        "reviewers": json.dumps(meta["reviewers"], ensure_ascii=False),
         "question_ids": json.dumps(question_ids, ensure_ascii=False),
     }
 
@@ -159,12 +151,6 @@ def _run_paper_flow(
     )
     api.upload(
         "/papers",
-        fields={**a_fields, "authors": "not-json"},
-        file_path=appendix_paths["mock-a"],
-        expect=400,
-    )
-    api.upload(
-        "/papers",
         fields=a_fields,
         file_path=INVALID_PAPER_UPLOAD_PATH,
         expect=400,
@@ -226,12 +212,6 @@ def _run_paper_flow(
     )
     assert paper_b_id in body
 
-    _, body, _ = api.get(
-        f"/papers?category={config.category}&tag={config.tag}"
-        f"&q={urllib.parse.quote(config.paper_a['authors'][0])}"
-    )
-    assert paper_a_id in body
-
     # ── Detail ───────────────────────────────────────────────
     detail = parse_json(api.get(f"/papers/{paper_a_id}")[1])
     assert [q["question_id"] for q in detail["questions"]] == first_n
@@ -243,8 +223,6 @@ def _run_paper_flow(
             "description": config.patched_a["description"],
             "title": config.patched_a["title"],
             "subtitle": config.patched_a["subtitle"],
-            "authors": config.patched_a["authors"],
-            "reviewers": config.patched_a["reviewers"],
             "question_ids": reversed_n,
         },
     )
@@ -270,8 +248,6 @@ def _run_paper_flow(
 
     # Verify patch
     detail = parse_json(api.get(f"/papers/{paper_a_id}")[1])
-    assert detail["authors"] == config.patched_a["authors"]
-    assert detail["reviewers"] == config.patched_a["reviewers"]
     assert [q["question_id"] for q in detail["questions"]] == reversed_n
 
     # Cross-check question→paper queries
@@ -314,8 +290,6 @@ def _run_paper_flow(
                 "appendix_path": replaced_path,
                 "title": config.patched_a["title"],
                 "subtitle": config.patched_a["subtitle"],
-                "authors": config.patched_a["authors"],
-                "reviewers": config.patched_a["reviewers"],
                 "question_ids": reversed_n,
                 "asset_total": sum(acounts[q] for q in reversed_n),
             },
@@ -323,8 +297,6 @@ def _run_paper_flow(
                 "appendix_path": appendix_paths["mock-b"],
                 "title": config.paper_b["title"],
                 "subtitle": config.paper_b["subtitle"],
-                "authors": config.paper_b["authors"],
-                "reviewers": config.paper_b["reviewers"],
                 "question_ids": real_q_ids,
                 "asset_total": sum(acounts[q] for q in real_q_ids),
             },

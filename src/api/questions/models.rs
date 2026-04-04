@@ -44,6 +44,8 @@ pub struct QuestionSummary {
     pub(crate) category: String,
     pub(crate) status: String,
     pub(crate) description: String,
+    pub(crate) author: String,
+    pub(crate) reviewers: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) difficulty: QuestionDifficulty,
     pub(crate) created_at: String,
@@ -67,6 +69,8 @@ pub struct QuestionDetail {
     pub(crate) category: String,
     pub(crate) status: String,
     pub(crate) description: String,
+    pub(crate) author: String,
+    pub(crate) reviewers: Vec<String>,
     pub(crate) tags: Vec<String>,
     pub(crate) difficulty: QuestionDifficulty,
     pub(crate) created_at: String,
@@ -95,6 +99,8 @@ pub(crate) struct CreateQuestionRequest {
     pub(crate) tags: Option<Vec<String>>,
     pub(crate) status: Option<String>,
     pub(crate) difficulty: QuestionDifficulty,
+    pub(crate) author: Option<String>,
+    pub(crate) reviewers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +116,10 @@ pub(crate) struct UpdateQuestionMetadataRequest {
     pub(crate) status: Option<String>,
     #[serde(default)]
     pub(crate) difficulty: Option<QuestionDifficulty>,
+    #[serde(default)]
+    pub(crate) author: Option<String>,
+    #[serde(default)]
+    pub(crate) reviewers: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -119,6 +129,8 @@ pub(crate) struct NormalizedQuestionMetadataUpdate {
     pub(crate) tags: Option<Vec<String>>,
     pub(crate) status: Option<String>,
     pub(crate) difficulty: Option<NormalizedQuestionDifficulty>,
+    pub(crate) author: Option<String>,
+    pub(crate) reviewers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +148,8 @@ pub(crate) struct NormalizedCreateQuestionRequest {
     pub(crate) tags: Vec<String>,
     pub(crate) status: String,
     pub(crate) difficulty: NormalizedQuestionDifficulty,
+    pub(crate) author: String,
+    pub(crate) reviewers: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,6 +208,12 @@ impl CreateQuestionRequest {
             .transpose()?
             .unwrap_or_else(|| "none".to_string());
         let difficulty = self.difficulty.normalize()?;
+        let author = normalize_optional_author(self.author);
+        let reviewers = self
+            .reviewers
+            .map(normalize_reviewers)
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(NormalizedCreateQuestionRequest {
             description,
@@ -201,6 +221,8 @@ impl CreateQuestionRequest {
             tags,
             status,
             difficulty,
+            author,
+            reviewers,
         })
     }
 }
@@ -212,9 +234,11 @@ impl UpdateQuestionMetadataRequest {
             && self.tags.is_none()
             && self.status.is_none()
             && self.difficulty.is_none()
+            && self.author.is_none()
+            && self.reviewers.is_none()
         {
             return Err(anyhow!(
-                "request body must include at least one of: category, description, tags, status, difficulty"
+                "request body must include at least one of: category, description, tags, status, difficulty, author, reviewers"
             ));
         }
 
@@ -235,6 +259,8 @@ impl UpdateQuestionMetadataRequest {
             .difficulty
             .map(QuestionDifficulty::normalize)
             .transpose()?;
+        let author = self.author.map(|v| v.trim().to_string());
+        let reviewers = self.reviewers.map(normalize_reviewers).transpose()?;
 
         Ok(NormalizedQuestionMetadataUpdate {
             category,
@@ -242,6 +268,8 @@ impl UpdateQuestionMetadataRequest {
             tags,
             status,
             difficulty,
+            author,
+            reviewers,
         })
     }
 }
@@ -279,6 +307,27 @@ fn normalize_optional_plaintext(value: String) -> Option<String> {
     } else {
         Some(trimmed)
     }
+}
+
+fn normalize_optional_author(value: Option<String>) -> String {
+    value.map(|v| v.trim().to_string()).unwrap_or_default()
+}
+
+fn normalize_reviewers(values: Vec<String>) -> Result<Vec<String>> {
+    let mut normalized = Vec::with_capacity(values.len());
+    let mut seen = HashSet::new();
+
+    for value in values {
+        let name = value.trim().to_string();
+        if name.is_empty() {
+            bail!("reviewers must not contain empty strings");
+        }
+        if seen.insert(name.clone()) {
+            normalized.push(name);
+        }
+    }
+
+    Ok(normalized)
 }
 
 fn normalize_tags(values: Vec<String>) -> Result<Vec<String>> {
@@ -363,6 +412,8 @@ mod tests {
                     ),
                 ]),
             },
+            author: Some(" 张三 ".into()),
+            reviewers: Some(vec![" 李四 ".into(), "王五".into()]),
         };
 
         let normalized = request.normalize().expect("request should normalize");
@@ -379,6 +430,11 @@ mod tests {
             Some("calibrated")
         );
         assert_eq!(normalized.difficulty["heuristic"].notes, None);
+        assert_eq!(normalized.author, "张三");
+        assert_eq!(
+            normalized.reviewers,
+            vec!["李四".to_string(), "王五".to_string()]
+        );
     }
 
     #[test]
@@ -397,12 +453,16 @@ mod tests {
                     },
                 )]),
             },
+            author: None,
+            reviewers: None,
         };
 
         let normalized = request.normalize().expect("request should normalize");
         assert_eq!(normalized.category, "none");
         assert!(normalized.tags.is_empty());
         assert_eq!(normalized.status, "none");
+        assert_eq!(normalized.author, "");
+        assert!(normalized.reviewers.is_empty());
     }
 
     #[test]
@@ -413,6 +473,8 @@ mod tests {
             tags: Some(vec![" optics ".into(), "mechanics".into(), "optics".into()]),
             status: Some(" reviewed ".into()),
             difficulty: None,
+            author: None,
+            reviewers: None,
         };
 
         let normalized = request.normalize().expect("request should normalize");

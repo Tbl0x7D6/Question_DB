@@ -53,8 +53,6 @@ def validate_paper_bundle(
             assert item["template_source"] == expected_template_source
             assert item["metadata"]["title"] == exp["title"]
             assert item["metadata"]["subtitle"] == exp["subtitle"]
-            assert item["metadata"]["authors"] == exp["authors"]
-            assert item["metadata"]["reviewers"] == exp["reviewers"]
 
             # appendix round-trip
             af = item["append_file"]

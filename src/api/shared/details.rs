@@ -52,6 +52,8 @@ pub(crate) async fn load_question_detail(
         r#"
         SELECT q.question_id::text AS question_id, q.source_tex_path, q.category, q.status,
                COALESCE(q.description, '') AS description,
+               q.author,
+               q.reviewers,
                to_char(q.created_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS created_at,
                to_char(q.updated_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS updated_at,
                to_char(q.deleted_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS deleted_at,
@@ -120,7 +122,7 @@ pub(crate) async fn load_paper_detail(
 
     let paper_row = query(&format!(
         r#"
-        SELECT p.paper_id::text AS paper_id, p.description, p.title, p.subtitle, p.authors, p.reviewers,
+        SELECT p.paper_id::text AS paper_id, p.description, p.title, p.subtitle,
                to_char(p.created_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS created_at,
                to_char(p.updated_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS updated_at,
                to_char(p.deleted_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS deleted_at,

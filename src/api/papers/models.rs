@@ -15,8 +15,6 @@ pub struct PaperSummary {
     pub(crate) description: String,
     pub(crate) title: String,
     pub(crate) subtitle: String,
-    pub(crate) authors: Vec<String>,
-    pub(crate) reviewers: Vec<String>,
     pub(crate) question_count: i64,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
@@ -37,8 +35,6 @@ pub struct PaperDetail {
     pub(crate) description: String,
     pub(crate) title: String,
     pub(crate) subtitle: String,
-    pub(crate) authors: Vec<String>,
-    pub(crate) reviewers: Vec<String>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
     pub(crate) questions: Vec<PaperQuestionSummary>,
@@ -49,8 +45,6 @@ pub(crate) struct CreatePaperRequest {
     pub(crate) description: String,
     pub(crate) title: String,
     pub(crate) subtitle: String,
-    pub(crate) authors: Vec<String>,
-    pub(crate) reviewers: Vec<String>,
     pub(crate) question_ids: Vec<String>,
 }
 
@@ -89,10 +83,6 @@ pub(crate) struct UpdatePaperRequest {
     #[serde(default)]
     pub(crate) subtitle: Option<Option<String>>,
     #[serde(default)]
-    pub(crate) authors: Option<Option<Vec<String>>>,
-    #[serde(default)]
-    pub(crate) reviewers: Option<Option<Vec<String>>>,
-    #[serde(default)]
     pub(crate) question_ids: Option<Option<Vec<String>>>,
 }
 
@@ -101,8 +91,6 @@ pub(crate) struct NormalizedCreatePaperRequest {
     pub(crate) description: String,
     pub(crate) title: String,
     pub(crate) subtitle: String,
-    pub(crate) authors: Vec<String>,
-    pub(crate) reviewers: Vec<String>,
     pub(crate) question_ids: Vec<String>,
 }
 
@@ -111,8 +99,6 @@ pub(crate) struct NormalizedPaperUpdate {
     pub(crate) description: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) subtitle: Option<String>,
-    pub(crate) authors: Option<Vec<String>>,
-    pub(crate) reviewers: Option<Vec<String>>,
     pub(crate) question_ids: Option<Vec<String>>,
 }
 
@@ -127,16 +113,12 @@ impl CreatePaperRequest {
         let description = normalize_required_description("description", &self.description)?;
         let title = normalize_required_metadata_text("title", &self.title)?;
         let subtitle = normalize_required_metadata_text("subtitle", &self.subtitle)?;
-        let authors = normalize_text_list("authors", self.authors)?;
-        let reviewers = normalize_text_list("reviewers", self.reviewers)?;
         let question_ids = normalize_question_ids(self.question_ids)?;
 
         Ok(NormalizedCreatePaperRequest {
             description,
             title,
             subtitle,
-            authors,
-            reviewers,
             question_ids,
         })
     }
@@ -147,12 +129,10 @@ impl UpdatePaperRequest {
         if self.description.is_none()
             && self.title.is_none()
             && self.subtitle.is_none()
-            && self.authors.is_none()
-            && self.reviewers.is_none()
             && self.question_ids.is_none()
         {
             return Err(anyhow!(
-                "request body must include at least one of: description, title, subtitle, authors, reviewers, question_ids"
+                "request body must include at least one of: description, title, subtitle, question_ids"
             ));
         }
 
@@ -168,14 +148,6 @@ impl UpdatePaperRequest {
             .subtitle
             .map(|value| normalize_required_metadata_option("subtitle", value))
             .transpose()?;
-        let authors = self
-            .authors
-            .map(|value| normalize_required_text_list("authors", value))
-            .transpose()?;
-        let reviewers = self
-            .reviewers
-            .map(|value| normalize_required_text_list("reviewers", value))
-            .transpose()?;
         let question_ids = self
             .question_ids
             .map(|value| normalize_required_question_ids("question_ids", value))
@@ -185,8 +157,6 @@ impl UpdatePaperRequest {
             description,
             title,
             subtitle,
-            authors,
-            reviewers,
             question_ids,
         })
     }
@@ -225,27 +195,6 @@ fn normalize_required_metadata_text(field: &str, value: &str) -> Result<String> 
     if normalized.chars().any(char::is_control) {
         bail!("{field} must not contain control characters");
     }
-    Ok(normalized)
-}
-
-fn normalize_required_text_list(field: &str, value: Option<Vec<String>>) -> Result<Vec<String>> {
-    let Some(items) = value else {
-        bail!("{field} must not be null");
-    };
-    normalize_text_list(field, items)
-}
-
-fn normalize_text_list(field: &str, values: Vec<String>) -> Result<Vec<String>> {
-    let mut normalized = Vec::with_capacity(values.len());
-    let mut seen = HashSet::new();
-
-    for value in values {
-        let item = normalize_required_metadata_text(field, &value)?;
-        if seen.insert(item.clone()) {
-            normalized.push(item);
-        }
-    }
-
     Ok(normalized)
 }
 
@@ -304,8 +253,6 @@ mod tests {
             description: "  综合训练试卷  ".into(),
             title: "  2026 校内选拔  ".into(),
             subtitle: "  第一场  ".into(),
-            authors: vec![" Alice ".into(), "Bob".into(), "Alice".into()],
-            reviewers: vec![" Carol ".into()],
             question_ids: vec![" q1 ".into()],
         };
 
@@ -313,11 +260,6 @@ mod tests {
         assert_eq!(normalized.description, "综合训练试卷");
         assert_eq!(normalized.title, "2026 校内选拔");
         assert_eq!(normalized.subtitle, "第一场");
-        assert_eq!(
-            normalized.authors,
-            vec!["Alice".to_string(), "Bob".to_string()]
-        );
-        assert_eq!(normalized.reviewers, vec!["Carol".to_string()]);
         assert_eq!(normalized.question_ids, vec!["q1".to_string()]);
     }
 
@@ -327,8 +269,6 @@ mod tests {
             description: "demo".into(),
             title: "title".into(),
             subtitle: "subtitle".into(),
-            authors: vec![],
-            reviewers: vec![],
             question_ids: vec![],
         };
 
@@ -351,8 +291,6 @@ mod tests {
         let request: UpdatePaperRequest = serde_json::from_str(
             r#"{
                 "description":"  综合训练重排卷  ",
-                "authors":[" Alice ","Bob","Alice"],
-                "reviewers":[" Carol "],
                 "question_ids":[" q1 ","q2 "]
             }"#,
         )
@@ -360,14 +298,6 @@ mod tests {
 
         let normalized = request.normalize().expect("request should normalize");
         assert_eq!(normalized.description.as_deref(), Some("综合训练重排卷"));
-        assert_eq!(
-            normalized.authors.expect("authors should be present"),
-            vec!["Alice".to_string(), "Bob".to_string()]
-        );
-        assert_eq!(
-            normalized.reviewers.expect("reviewers should be present"),
-            vec!["Carol".to_string()]
-        );
         assert_eq!(
             normalized
                 .question_ids

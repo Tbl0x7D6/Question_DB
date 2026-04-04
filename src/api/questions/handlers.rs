@@ -8,9 +8,9 @@ use sqlx::{query, Row};
 use super::{
     imports::{import_question_zip, replace_question_zip, MAX_UPLOAD_BYTES},
     models::{
-        CreateQuestionRequest, QuestionDeleteResponse, QuestionDetail,
-        QuestionDifficulty, QuestionFileReplaceResponse, QuestionImportResponse, QuestionSummary,
-        QuestionsParams, UpdateQuestionMetadataRequest,
+        CreateQuestionRequest, QuestionDeleteResponse, QuestionDetail, QuestionDifficulty,
+        QuestionFileReplaceResponse, QuestionImportResponse, QuestionSummary, QuestionsParams,
+        UpdateQuestionMetadataRequest,
     },
     queries::{
         execute_questions_query, load_question_difficulties_batch, load_question_tags_batch,
@@ -34,8 +34,7 @@ pub(crate) async fn list_questions(
     Query(params): Query<QuestionsParams>,
     State(state): State<AppState>,
 ) -> ApiResult<Paginated<QuestionSummary>> {
-    validate_question_filters(&params)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    validate_question_filters(&params).map_err(|e| ApiError::bad_request(e.to_string()))?;
     let mut plan = params.build_query();
     let limit = plan.limit;
     let offset = plan.offset;
@@ -63,10 +62,7 @@ pub(crate) async fn list_questions(
         .map(|row| {
             let qid: String = row.get("question_id");
             let tags = tags_map.get(&qid).cloned().unwrap_or_default();
-            let difficulty = difficulty_map
-                .get(&qid)
-                .cloned()
-                .unwrap_or_default();
+            let difficulty = difficulty_map.get(&qid).cloned().unwrap_or_default();
             map_question_summary(row, tags, difficulty)
         })
         .collect();
@@ -97,6 +93,8 @@ pub(crate) async fn create_question(
     let mut tags = None;
     let mut status = None;
     let mut difficulty = None;
+    let mut author = None;
+    let mut reviewers = None;
     let mut bytes = Vec::new();
 
     while let Some(field) = next_multipart_field(&mut multipart).await? {
@@ -122,7 +120,14 @@ pub(crate) async fn create_question(
                 status = Some(read_text_field(field, "status").await?);
             }
             "difficulty" => {
-                difficulty = Some(read_json_field::<QuestionDifficulty>(field, "difficulty").await?);
+                difficulty =
+                    Some(read_json_field::<QuestionDifficulty>(field, "difficulty").await?);
+            }
+            "author" => {
+                author = Some(read_text_field(field, "author").await?);
+            }
+            "reviewers" => {
+                reviewers = Some(read_json_field(field, "reviewers").await?);
             }
             _ => {}
         }
@@ -139,6 +144,8 @@ pub(crate) async fn create_question(
         difficulty: difficulty.ok_or_else(|| {
             ApiError::bad_request("multipart form must include a non-empty 'difficulty' field")
         })?,
+        author,
+        reviewers,
     }
     .normalize()
     .map_err(|err| ApiError::bad_request(err.to_string()))?;
@@ -228,6 +235,26 @@ pub(crate) async fn update_question_metadata(
             .execute(&mut *tx)
             .await
             .context("update question status failed")?;
+    }
+
+    if let Some(author) = &update.author {
+        query("UPDATE questions SET author = $2, updated_at = NOW() WHERE question_id = $1::uuid")
+            .bind(&question_id)
+            .bind(author)
+            .execute(&mut *tx)
+            .await
+            .context("update question author failed")?;
+    }
+
+    if let Some(reviewers) = &update.reviewers {
+        query(
+            "UPDATE questions SET reviewers = $2, updated_at = NOW() WHERE question_id = $1::uuid",
+        )
+        .bind(&question_id)
+        .bind(reviewers)
+        .execute(&mut *tx)
+        .await
+        .context("update question reviewers failed")?;
     }
 
     if let Some(difficulty) = &update.difficulty {
@@ -364,4 +391,3 @@ async fn fetch_question_detail(
     .map(|loaded| loaded.detail)
     .map_err(ApiError::from)
 }
-
