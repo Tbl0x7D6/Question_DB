@@ -22,15 +22,19 @@ use crate::api::{
         render_paper_bundle, PaperTemplateKind, RenderPaperInput, RenderQuestionAssetInput,
         RenderQuestionInput,
     },
-    papers::models::PaperDetail,
-    questions::{
-        models::{QuestionAssetRef, QuestionDetail, QuestionPaperRef},
-        queries::{
-            load_question_difficulties, load_question_files, load_question_tags, map_paper_detail,
-            map_paper_question_summary, map_question_detail,
-        },
+    papers::{
+        models::PaperDetail,
+        queries::{map_paper_detail, map_paper_question_summary},
     },
-    shared::utils::bundle_directory_name,
+    questions::{
+        models::{QuestionAssetRef, QuestionDetail},
+        queries::{load_question_files, load_question_tags},
+    },
+    shared::{
+        db::fetch_object_bytes,
+        details::{load_question_detail, DetailVisibility},
+        utils::bundle_directory_name,
+    },
 };
 
 #[derive(Debug, Serialize)]
@@ -338,67 +342,26 @@ async fn finish_zip_response(
 }
 
 async fn load_question_bundle_data(pool: &PgPool, question_id: &str) -> Result<QuestionBundleData> {
-    let row = query(
-        r#"
-        SELECT question_id::text AS question_id, source_tex_path, category, status,
-               COALESCE(description, '') AS description,
-               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
-               to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
-        FROM questions
-        WHERE question_id = $1::uuid
-        "#,
+    let loaded = load_question_detail(
+        pool,
+        question_id,
+        DetailVisibility::ActiveOnly,
+        DetailVisibility::ActiveOnly,
     )
-    .bind(question_id)
-    .fetch_optional(pool)
-    .await
-    .with_context(|| format!("load question detail failed: {question_id}"))?
-    .ok_or_else(|| anyhow!("question not found: {question_id}"))?;
+    .await?;
 
-    let tex_files = load_question_files(pool, question_id, "tex")
+    let all_files = load_question_files(pool, question_id, "tex")
         .await
-        .with_context(|| format!("load question tex files failed: {question_id}"))?;
-    let tex_object_id = tex_files
-        .first()
-        .map(|file| file.object_id.clone())
-        .ok_or_else(|| anyhow!("question is missing a tex object: {question_id}"))?;
-    let assets = load_question_files(pool, question_id, "asset")
-        .await
-        .with_context(|| format!("load question assets failed: {question_id}"))?;
-    let tags = load_question_tags(pool, question_id)
-        .await
-        .with_context(|| format!("load question tags failed: {question_id}"))?;
-    let difficulty = load_question_difficulties(pool, question_id)
-        .await
-        .with_context(|| format!("load question difficulties failed: {question_id}"))?;
-
-    let papers = query(
-        r#"
-        SELECT p.paper_id::text AS paper_id, p.description, p.title, p.subtitle, pq.sort_order
-        FROM paper_questions pq
-        JOIN papers p ON p.paper_id = pq.paper_id
-        WHERE pq.question_id = $1::uuid
-        ORDER BY p.created_at DESC, pq.sort_order
-        "#,
-    )
-    .bind(question_id)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("load question papers failed: {question_id}"))?
-    .into_iter()
-    .map(|row| QuestionPaperRef {
-        paper_id: row.get("paper_id"),
-        description: row.get("description"),
-        title: row.get("title"),
-        subtitle: row.get("subtitle"),
-        sort_order: row.get("sort_order"),
-    })
-    .collect::<Vec<_>>();
-
-    let mut files = tex_files.clone();
-    files.extend(assets.clone());
+        .with_context(|| format!("load question tex files for bundle failed: {question_id}"))?;
+    let mut files = all_files;
+    files.extend(
+        load_question_files(pool, question_id, "asset")
+            .await
+            .with_context(|| format!("load question assets for bundle failed: {question_id}"))?,
+    );
 
     Ok(QuestionBundleData {
-        metadata: map_question_detail(row, tex_object_id, tags, difficulty, assets, papers),
+        metadata: loaded.detail,
         files,
     })
 }
@@ -407,13 +370,13 @@ async fn load_paper_bundle_data(pool: &PgPool, paper_id: &str) -> Result<PaperBu
     let paper_row = query(
         r#"
         SELECT p.paper_id::text AS paper_id, p.description, p.title, p.subtitle,
-               p.authors, p.reviewers, p.append_object_id::text AS append_object_id,
+               p.append_object_id::text AS append_object_id,
                o.file_name AS append_file_name, o.mime_type AS append_mime_type,
                to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM papers p
         JOIN objects o ON o.object_id = p.append_object_id
-        WHERE p.paper_id = $1::uuid
+        WHERE p.paper_id = $1::uuid AND p.deleted_at IS NULL
         "#,
     )
     .bind(paper_id)
@@ -427,7 +390,7 @@ async fn load_paper_bundle_data(pool: &PgPool, paper_id: &str) -> Result<PaperBu
         SELECT q.question_id::text AS question_id, pq.sort_order, q.category, q.status
         FROM paper_questions pq
         JOIN questions q ON q.question_id = pq.question_id
-        WHERE pq.paper_id = $1::uuid
+        WHERE pq.paper_id = $1::uuid AND q.deleted_at IS NULL
         ORDER BY pq.sort_order
         "#,
     )
@@ -495,11 +458,33 @@ async fn build_render_paper_input(
         });
     }
 
+    // Collect authors from questions in sort order, deduplicate preserving order.
+    let mut authors = Vec::new();
+    let mut seen_authors = std::collections::HashSet::new();
+    for question in &bundle.questions {
+        let author = question.metadata.author.trim();
+        if !author.is_empty() && seen_authors.insert(author.to_string()) {
+            authors.push(author.to_string());
+        }
+    }
+
+    // Collect reviewers from all questions, deduplicate preserving order.
+    let mut reviewers = Vec::new();
+    let mut seen_reviewers = std::collections::HashSet::new();
+    for question in &bundle.questions {
+        for reviewer in &question.metadata.reviewers {
+            let reviewer = reviewer.trim();
+            if !reviewer.is_empty() && seen_reviewers.insert(reviewer.to_string()) {
+                reviewers.push(reviewer.to_string());
+            }
+        }
+    }
+
     Ok(RenderPaperInput {
         title: bundle.metadata.title.clone(),
         subtitle: bundle.metadata.subtitle.clone(),
-        authors: bundle.metadata.authors.clone(),
-        reviewers: bundle.metadata.reviewers.clone(),
+        authors,
+        reviewers,
         template_kind,
         questions,
     })
@@ -531,15 +516,6 @@ fn determine_paper_template_kind(questions: &[QuestionBundleData]) -> Result<Pap
     }
 
     Ok(template_kind)
-}
-
-async fn fetch_object_bytes(pool: &PgPool, object_id: &str) -> Result<Vec<u8>> {
-    let row = query("SELECT content FROM objects WHERE object_id = $1::uuid")
-        .bind(object_id)
-        .fetch_one(pool)
-        .await
-        .with_context(|| format!("load object content failed: {object_id}"))?;
-    Ok(row.get("content"))
 }
 
 fn temp_zip_path(prefix: &str) -> PathBuf {

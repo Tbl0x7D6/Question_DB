@@ -1,14 +1,15 @@
-use std::{
-    io::Cursor,
-    path::{Path, PathBuf},
-};
+use std::io::Cursor;
 
 use anyhow::{bail, Context, Result};
-use sqlx::{query, PgPool, Postgres, Row, Transaction};
+use sqlx::{query, PgPool, Row};
 use uuid::Uuid;
 use zip::ZipArchive;
 
 use super::models::{NormalizedCreatePaperRequest, PaperFileReplaceResponse, PaperImportResponse};
+use crate::api::shared::{
+    db::{insert_object_tx, normalize_upload_file_name},
+    error::{NotFoundError, ValidationError},
+};
 
 pub(crate) const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 
@@ -19,16 +20,16 @@ pub(crate) async fn import_paper_zip(
     zip_bytes: Vec<u8>,
 ) -> Result<PaperImportResponse> {
     if zip_bytes.is_empty() {
-        bail!("uploaded file is empty");
+        return Err(ValidationError("uploaded file is empty".into()).into());
     }
     if zip_bytes.len() > MAX_UPLOAD_BYTES {
-        bail!("uploaded zip exceeds 20 MiB limit");
+        return Err(ValidationError("uploaded zip exceeds 20 MiB limit".into()).into());
     }
 
     validate_uploaded_zip(&zip_bytes)?;
 
     let paper_id = Uuid::new_v4().to_string();
-    let normalized_file_name = normalize_upload_file_name(file_name);
+    let normalized_file_name = normalize_upload_file_name(file_name, "paper.zip");
     let mut tx = pool.begin().await.context("begin paper import tx failed")?;
     let append_object_id = insert_object_tx(
         &mut tx,
@@ -41,18 +42,16 @@ pub(crate) async fn import_paper_zip(
     query(
         r#"
         INSERT INTO papers (
-            paper_id, description, title, subtitle, authors, reviewers,
+            paper_id, description, title, subtitle,
             append_object_id, created_at, updated_at
         )
-        VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::uuid, NOW(), NOW())
+        VALUES ($1::uuid, $2, $3, $4, $5::uuid, NOW(), NOW())
         "#,
     )
     .bind(&paper_id)
     .bind(&request.description)
     .bind(&request.title)
     .bind(&request.subtitle)
-    .bind(&request.authors)
-    .bind(&request.reviewers)
     .bind(&append_object_id)
     .execute(&mut *tx)
     .await
@@ -98,21 +97,21 @@ pub(crate) async fn replace_paper_zip(
 
     validate_uploaded_zip(&zip_bytes)?;
 
-    let normalized_file_name = normalize_upload_file_name(file_name);
+    let normalized_file_name = normalize_upload_file_name(file_name, "paper.zip");
     let mut tx = pool
         .begin()
         .await
         .context("begin paper file replace tx failed")?;
 
     let previous_object_id = query(
-        "SELECT append_object_id::text AS append_object_id FROM papers WHERE paper_id = $1::uuid",
+        "SELECT append_object_id::text AS append_object_id FROM papers WHERE paper_id = $1::uuid AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(paper_id)
     .fetch_optional(&mut *tx)
     .await
     .context("load paper appendix reference failed")?
     .map(|row| row.get::<String, _>("append_object_id"))
-    .ok_or_else(|| anyhow::anyhow!("paper not found: {paper_id}"))?;
+    .ok_or_else(|| NotFoundError(format!("paper not found: {paper_id}")))?;
 
     let append_object_id = insert_object_tx(
         &mut tx,
@@ -148,48 +147,8 @@ pub(crate) async fn replace_paper_zip(
 
 fn validate_uploaded_zip(zip_bytes: &[u8]) -> Result<()> {
     let cursor = Cursor::new(zip_bytes);
-    ZipArchive::new(cursor).context("open zip archive failed")?;
+    ZipArchive::new(cursor).map_err(|e| ValidationError(format!("invalid zip archive: {e}")))?;
     Ok(())
-}
-
-fn normalize_upload_file_name(file_name: Option<&str>) -> String {
-    let candidate = file_name
-        .and_then(|value| Path::new(value).file_name())
-        .map(|value| value.to_string_lossy().to_string())
-        .filter(|value| !value.trim().is_empty());
-
-    candidate.unwrap_or_else(|| "paper.zip".to_string())
-}
-
-async fn insert_object_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    file_name: &str,
-    bytes: &[u8],
-    mime_type: Option<&str>,
-) -> Result<String> {
-    let object_id = Uuid::new_v4().to_string();
-    let source_path = PathBuf::from(file_name);
-    let normalized_file_name = source_path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "blob.bin".to_string());
-
-    query(
-        r#"
-        INSERT INTO objects (object_id, file_name, mime_type, size_bytes, content, created_at)
-        VALUES ($1::uuid, $2, $3, $4, $5, NOW())
-        "#,
-    )
-    .bind(&object_id)
-    .bind(&normalized_file_name)
-    .bind(mime_type)
-    .bind(i64::try_from(bytes.len()).context("object bytes exceed i64 range")?)
-    .bind(bytes)
-    .execute(&mut **tx)
-    .await
-    .context("insert object failed")?;
-
-    Ok(object_id)
 }
 
 #[cfg(test)]
@@ -219,7 +178,7 @@ mod tests {
     #[test]
     fn validate_uploaded_zip_rejects_invalid_zip_bytes() {
         let err = validate_uploaded_zip(b"not-a-zip").expect_err("should reject");
-        assert!(err.to_string().contains("open zip archive failed"));
+        assert!(err.to_string().contains("invalid zip archive"));
     }
 
     #[test]

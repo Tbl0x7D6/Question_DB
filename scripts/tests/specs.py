@@ -47,6 +47,8 @@ QUESTION_SPECS = [
             "description": "mechanics benchmark alpha",
             "tags": ["mechanics", "kinematics"],
             "status": "reviewed",
+            "author": "张三",
+            "reviewers": ["李四", "王五"],
             "difficulty": {
                 "human": {"score": 4, "notes": "warm-up"},
                 "heuristic": {"score": 5, "notes": "fast estimate"},
@@ -78,6 +80,8 @@ QUESTION_SPECS = [
             "description": "optics bundle beta",
             "tags": ["optics", "lenses"],
             "status": "used",
+            "author": "赵六",
+            "reviewers": ["钱七", "孙八"],
             "difficulty": {
                 "human": {"score": 7, "notes": "competition-ready"},
                 "heuristic": {"score": 6, "notes": "geometry-heavy"},
@@ -109,6 +113,8 @@ QUESTION_SPECS = [
             "description": "热学标定 gamma",
             "tags": ["thermal", "calorimetry"],
             "status": "none",
+            "author": "周九",
+            "reviewers": ["吴十"],
             "difficulty": {
                 "human": {"score": 5, "notes": ""},
                 "heuristic": {"score": 4, "notes": "direct model"},

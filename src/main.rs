@@ -1,6 +1,6 @@
 use anyhow::Result;
 use qb_api::{
-    api::{router, AppState},
+    api::{hash_password, router, seed_admin_if_empty, AppState},
     config::AppConfig,
     db::create_pool,
 };
@@ -15,12 +15,55 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = AppConfig::from_env()?;
-    let pool = create_pool(&cfg.database_url).await?;
+    let pool = create_pool(&cfg.database_url, cfg.max_db_connections).await?;
 
-    let app = router(AppState { pool });
+    // Seed default admin account if the users table is empty.
+    // Default password is "changeme" – MUST be changed after first login.
+    match hash_password("changeme") {
+        Ok(default_hash) => match seed_admin_if_empty(&pool, &default_hash).await {
+            Ok(true) => {
+                tracing::info!("seeded default admin user (username=admin, password=changeme)")
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!("could not seed admin user (table may not exist yet): {e}"),
+        },
+        Err(e) => tracing::warn!("could not hash default password: {e}"),
+    }
+
+    let state = AppState {
+        pool,
+        export_dir: cfg.export_dir.clone(),
+        jwt_secret: cfg.jwt_secret.clone(),
+    };
+    let app = router(state, &cfg.cors_origins);
     let listener = TcpListener::bind(cfg.bind_addr).await?;
 
     tracing::info!(addr = %cfg.bind_addr, "qb_api_rust listening");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown signal received");
 }

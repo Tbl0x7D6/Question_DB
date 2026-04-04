@@ -1,5 +1,10 @@
 # Questions API
 
+鉴权要求：
+- `GET` 操作：需要 `viewer` 及以上角色
+- `POST / PATCH / DELETE / PUT` 操作：需要 `editor` 及以上角色
+- 所有请求需携带 `Authorization: Bearer <access_token>` 头
+
 ## Endpoints
 
 ### `POST /questions`
@@ -23,6 +28,12 @@
   - 会去重；`[]` 表示创建时无标签
 - 可选字段：`status`
   - `none` | `reviewed` | `used`
+- 可选字段：`author`
+  - 命题人，字符串
+  - 默认空串
+- 可选字段：`reviewers`
+  - 审题人列表，传 JSON 字符串数组
+  - 会去重；默认 `[]`
 - 大小限制：20 MiB
 - zip 根目录必须包含且只包含：
   - 恰好一个 `.tex` 文件
@@ -31,7 +42,13 @@
   - `category = "none"`
   - `tags = []`
   - `status = "none"`
+  - `author = ""`
+  - `reviewers = []`
 - `created_at = NOW()`
+- `score` 会自动从 tex 文件中的 `\begin{problem}[<score>]` 标记提取
+  - 整数类型
+  - 如果 tex 中不包含该标记，则为 `null`
+  - 不支持通过 PATCH 手动更新
 
 成功响应：
 
@@ -49,6 +66,7 @@
 使用 JSON 请求体更新题目的 metadata，支持部分更新。
 
 - 服务端会先锁定目标题目的主记录；同一题目的 metadata 更新、文件替换和删除会串行执行，避免并发重建 `tags` / `difficulty` 时出现竞态
+- 已软删除题目会被视为不存在，返回 `404`
 
 支持字段：
 
@@ -64,6 +82,8 @@
   - `notes` 可选；空串会规范化为 `null`
   - 如果传了 `difficulty`，会整体替换整组 difficulty
   - `difficulty` 必须至少包含 `human`
+- `author`: 命题人，字符串
+- `reviewers`: 审题人列表，字符串数组，会去重
 
 成功时返回更新后的完整题目详情。
 
@@ -80,13 +100,17 @@
   - 删除题目当前关联的 tex / asset 文件对象
   - 写入新 zip 中的 tex / asset 文件
   - 更新 `source_tex_path`
+  - 重新提取 `score`（从新 tex 文件的 `\begin{problem}[<score>]`）
   - 更新 `updated_at`
 - 原有 metadata 会保留：
   - `category`
   - `description`
+  - `author`
+  - `reviewers`
   - `tags`
   - `status`
   - `difficulty`
+- 已软删除题目会被视为不存在，返回 `404`
 
 成功响应：
 
@@ -102,7 +126,14 @@
 
 ### `DELETE /questions/{question_id}`
 
-删除题目。
+软删除题目。
+
+语义：
+
+- 只会更新 `deleted_at` / `deleted_by` / `updated_at`
+- 不会立刻删除题目 binary；最终清理由管理员垃圾回收接口处理
+- 已软删除题目会被视为不存在，重复删除返回 `404`
+- 如果题目仍被任意未软删除试卷引用，返回 `409`
 
 成功响应：
 
@@ -117,27 +148,51 @@
 
 按条件分页查询题目，搜索也统一走这个接口。
 
+说明：
+
+- 只返回未软删除题目
+
 支持的 query 参数：
 
 - `paper_id`
 - `category`
 - `tag`
+- `score_min`
+- `score_max`
 - `difficulty_tag`
 - `difficulty_min`
 - `difficulty_max`
 - `q`
   关键词搜索，只会匹配 `description`
-- `limit`
-- `offset`
+- `limit`（默认 20，最大 100）
+- `offset`（默认 0）
 
 说明：
 
+- `score_min` / `score_max` 可单独使用，也可组合使用
+- `score_min` 必须 ≤ `score_max`（如同时提供）
 - `difficulty_min` / `difficulty_max` 需要和 `difficulty_tag` 一起使用
 - difficulty 过滤会匹配指定 tag 上的 score 范围
+
+响应格式（分页包裹）：
+
+```json
+{
+  "items": [ ... ],
+  "total": 42,
+  "limit": 20,
+  "offset": 0
+}
+```
 
 ### `GET /questions/{question_id}`
 
 返回单个题目的完整 metadata、文件引用和所属试卷。
+
+说明：
+
+- 只返回未软删除题目
+- 返回的 `papers` 只包含未软删除试卷
 
 ### `POST /questions/bundles`
 
@@ -157,3 +212,4 @@
 - zip 根目录包含 `manifest.json`
 - 每个题目使用 `description_uuid前缀/` 目录分组，例如 `热学标定 gamma_550e84/`
 - 目录内包含原始 `.tex` 和 `assets/` 资源文件
+- 已软删除题目不能通过这个接口下载

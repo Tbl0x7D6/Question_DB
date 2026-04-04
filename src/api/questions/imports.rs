@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use mime_guess::MimeGuess;
+use regex::Regex;
 use sqlx::{query, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 use zip::ZipArchive;
@@ -15,6 +16,10 @@ use zip::ZipArchive;
 use super::models::{
     NormalizedCreateQuestionRequest, NormalizedQuestionDifficulty, QuestionFileReplaceResponse,
     QuestionImportResponse,
+};
+use crate::api::shared::{
+    db::{insert_object_tx, normalize_upload_file_name},
+    error::{NotFoundError, ValidationError},
 };
 
 pub(crate) const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
@@ -30,6 +35,7 @@ struct ArchiveFile {
 struct LoadedQuestionZip {
     tex_file: ArchiveFile,
     asset_files: Vec<ArchiveFile>,
+    score: Option<i32>,
 }
 
 pub(crate) async fn import_question_zip(
@@ -39,13 +45,13 @@ pub(crate) async fn import_question_zip(
     zip_bytes: Vec<u8>,
 ) -> Result<QuestionImportResponse> {
     if zip_bytes.is_empty() {
-        bail!("uploaded file is empty");
+        return Err(ValidationError("uploaded file is empty".into()).into());
     }
     if zip_bytes.len() > MAX_UPLOAD_BYTES {
-        bail!("uploaded zip exceeds 20 MiB limit");
+        return Err(ValidationError("uploaded zip exceeds 20 MiB limit".into()).into());
     }
 
-    let loaded = load_question_zip(&zip_bytes)?;
+    let loaded = load_question_zip(&zip_bytes).map_err(|e| ValidationError(format!("{e:#}")))?;
     let question_id = Uuid::new_v4().to_string();
     let mut tx = pool
         .begin()
@@ -55,10 +61,10 @@ pub(crate) async fn import_question_zip(
     query(
         r#"
         INSERT INTO questions (
-            question_id, source_tex_path, category, status, description, created_at, updated_at
+            question_id, source_tex_path, category, status, description, score, author, reviewers, created_at, updated_at
         )
         VALUES (
-            $1::uuid, $2, $3, $4, $5, NOW(), NOW()
+            $1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
         )
         "#,
     )
@@ -67,6 +73,9 @@ pub(crate) async fn import_question_zip(
     .bind(&request.category)
     .bind(&request.status)
     .bind(&request.description)
+    .bind(loaded.score)
+    .bind(&request.author)
+    .bind(&request.reviewers)
     .execute(&mut *tx)
     .await
     .context("insert uploaded question failed")?;
@@ -79,7 +88,7 @@ pub(crate) async fn import_question_zip(
 
     Ok(QuestionImportResponse {
         question_id,
-        file_name: normalize_upload_file_name(file_name),
+        file_name: normalize_upload_file_name(file_name, "question.zip"),
         imported_assets: loaded.asset_files.len(),
         status: "imported",
     })
@@ -92,14 +101,14 @@ pub(crate) async fn replace_question_zip(
     zip_bytes: Vec<u8>,
 ) -> Result<QuestionFileReplaceResponse> {
     if zip_bytes.is_empty() {
-        bail!("uploaded file is empty");
+        return Err(ValidationError("uploaded file is empty".into()).into());
     }
     if zip_bytes.len() > MAX_UPLOAD_BYTES {
-        bail!("uploaded zip exceeds 20 MiB limit");
+        return Err(ValidationError("uploaded zip exceeds 20 MiB limit".into()).into());
     }
 
-    let loaded = load_question_zip(&zip_bytes)?;
-    let normalized_file_name = normalize_upload_file_name(file_name);
+    let loaded = load_question_zip(&zip_bytes).map_err(|e| ValidationError(format!("{e:#}")))?;
+    let normalized_file_name = normalize_upload_file_name(file_name, "question.zip");
     let mut tx = pool
         .begin()
         .await
@@ -107,23 +116,26 @@ pub(crate) async fn replace_question_zip(
 
     // Lock the parent row before rebuilding child rows so file replacement
     // cannot race metadata updates or deletion of the same question.
-    let exists = query("SELECT 1 FROM questions WHERE question_id = $1::uuid FOR UPDATE")
-        .bind(question_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .context("lock question row for file replace failed")?
-        .is_some();
+    let exists = query(
+        "SELECT 1 FROM questions WHERE question_id = $1::uuid AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(question_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("lock question row for file replace failed")?
+    .is_some();
     if !exists {
-        bail!("question not found: {question_id}");
+        return Err(NotFoundError(format!("question not found: {question_id}")).into());
     }
 
     replace_question_files_tx(&mut tx, question_id, &loaded).await?;
 
     query(
-        "UPDATE questions SET source_tex_path = $2, updated_at = NOW() WHERE question_id = $1::uuid",
+        "UPDATE questions SET source_tex_path = $2, score = $3, updated_at = NOW() WHERE question_id = $1::uuid",
     )
     .bind(question_id)
     .bind(&loaded.tex_file.path)
+    .bind(loaded.score)
     .execute(&mut *tx)
     .await
     .context("update question source tex path failed")?;
@@ -143,7 +155,8 @@ pub(crate) async fn replace_question_zip(
 
 fn load_question_zip(zip_bytes: &[u8]) -> Result<LoadedQuestionZip> {
     let cursor = Cursor::new(zip_bytes);
-    let mut archive = ZipArchive::new(cursor).context("open zip archive failed")?;
+    let mut archive = ZipArchive::new(cursor)
+        .map_err(|e| ValidationError(format!("invalid zip archive: {e}")))?;
     let mut files = BTreeMap::new();
     let mut directories = BTreeSet::new();
     let mut total_uncompressed = 0usize;
@@ -173,10 +186,12 @@ fn load_question_zip(zip_bytes: &[u8]) -> Result<LoadedQuestionZip> {
     }
 
     let (tex_file, asset_files) = validate_standard_layout(&files, &directories)?;
+    let score = extract_problem_score(&tex_file.bytes);
 
     Ok(LoadedQuestionZip {
         tex_file,
         asset_files,
+        score,
     })
 }
 
@@ -268,6 +283,16 @@ fn is_tex_file(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Extract the score from a `\begin{problem}[<score>]` marker in a TeX file.
+/// Returns `None` if no such marker is found or the content is not valid UTF-8.
+fn extract_problem_score(tex_bytes: &[u8]) -> Option<i32> {
+    let content = std::str::from_utf8(tex_bytes).ok()?;
+    let re = Regex::new(r"\\begin\{problem\}\[(\d+)\]").ok()?;
+    re.captures(content)
+        .and_then(|caps| caps.get(1))
+        .and_then(|m| m.as_str().parse::<i32>().ok())
+}
+
 fn register_parent_directories(directories: &mut BTreeSet<String>, path: &str) {
     let components = path.split('/').collect::<Vec<_>>();
     if components.len() <= 1 {
@@ -279,14 +304,6 @@ fn register_parent_directories(directories: &mut BTreeSet<String>, path: &str) {
     }
 }
 
-fn normalize_upload_file_name(file_name: Option<&str>) -> String {
-    file_name
-        .and_then(|value| Path::new(value).file_name())
-        .map(|value| value.to_string_lossy().to_string())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "question.zip".to_string())
-}
-
 async fn insert_loaded_question_files_tx(
     tx: &mut Transaction<'_, Postgres>,
     question_id: &str,
@@ -294,7 +311,7 @@ async fn insert_loaded_question_files_tx(
 ) -> Result<()> {
     let tex_object_id = insert_object_tx(
         tx,
-        Path::new(&loaded.tex_file.path),
+        &loaded.tex_file.path,
         &loaded.tex_file.bytes,
         Some("text/x-tex"),
     )
@@ -313,8 +330,7 @@ async fn insert_loaded_question_files_tx(
         let mime = MimeGuess::from_path(&asset.path)
             .first_raw()
             .map(str::to_string);
-        let object_id =
-            insert_object_tx(tx, Path::new(&asset.path), &asset.bytes, mime.as_deref()).await?;
+        let object_id = insert_object_tx(tx, &asset.path, &asset.bytes, mime.as_deref()).await?;
         insert_question_file_tx(
             tx,
             question_id,
@@ -409,36 +425,6 @@ async fn replace_question_files_tx(
     insert_loaded_question_files_tx(tx, question_id, loaded).await
 }
 
-async fn insert_object_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    source_path: &Path,
-    bytes: &[u8],
-    mime_type: Option<&str>,
-) -> Result<String> {
-    let object_id = Uuid::new_v4().to_string();
-    let file_name = source_path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "blob.bin".to_string());
-
-    query(
-        r#"
-        INSERT INTO objects (object_id, file_name, mime_type, size_bytes, content, created_at)
-        VALUES ($1::uuid, $2, $3, $4, $5, NOW())
-        "#,
-    )
-    .bind(&object_id)
-    .bind(&file_name)
-    .bind(mime_type)
-    .bind(i64::try_from(bytes.len()).context("object bytes exceed i64 range")?)
-    .bind(bytes)
-    .execute(&mut **tx)
-    .await
-    .context("insert object failed")?;
-
-    Ok(object_id)
-}
-
 async fn insert_question_file_tx(
     tx: &mut Transaction<'_, Postgres>,
     question_id: &str,
@@ -493,6 +479,7 @@ mod tests {
         let loaded = load_question_zip(&build_zip()).expect("zip should parse");
         assert_eq!(loaded.tex_file.path, "problem.tex");
         assert_eq!(loaded.asset_files.len(), 1);
+        assert_eq!(loaded.score, None);
     }
 
     #[test]
@@ -516,5 +503,140 @@ mod tests {
     #[test]
     fn upload_limit_constant_matches_requirement() {
         assert_eq!(MAX_UPLOAD_BYTES, 20 * 1024 * 1024);
+    }
+
+    #[test]
+    fn load_question_zip_rejects_path_traversal() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("../etc/passwd", options).unwrap();
+        writer.write_all(b"root").unwrap();
+
+        let zip = writer.finish().unwrap().into_inner();
+        let err = load_question_zip(&zip).expect_err("zip should be rejected");
+        assert!(err.to_string().contains("unsafe path"));
+    }
+
+    #[test]
+    fn load_question_zip_rejects_absolute_path() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("/etc/passwd", options).unwrap();
+        writer.write_all(b"root").unwrap();
+
+        let zip = writer.finish().unwrap().into_inner();
+        let err = load_question_zip(&zip).expect_err("zip should be rejected");
+        assert!(err.to_string().contains("must be relative"));
+    }
+
+    #[test]
+    fn load_question_zip_rejects_zip_bomb() {
+        use super::MAX_TOTAL_UNCOMPRESSED_BYTES;
+
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("problem.tex", options).unwrap();
+        writer.write_all(br"\section{Demo}").unwrap();
+
+        // Write a single large file that exceeds the limit
+        writer.start_file("assets/big.bin", options).unwrap();
+        let chunk = vec![0u8; 1024 * 1024]; // 1 MiB chunks
+        let chunks_needed = (MAX_TOTAL_UNCOMPRESSED_BYTES / chunk.len()) + 2;
+        for _ in 0..chunks_needed {
+            writer.write_all(&chunk).unwrap();
+        }
+
+        let zip = writer.finish().unwrap().into_inner();
+        let err = load_question_zip(&zip).expect_err("zip should be rejected");
+        assert!(err.to_string().contains("uncompressed size"));
+    }
+
+    #[test]
+    fn load_question_zip_rejects_missing_assets_directory() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("problem.tex", options).unwrap();
+        writer.write_all(br"\section{Demo}").unwrap();
+
+        let zip = writer.finish().unwrap().into_inner();
+        let err = load_question_zip(&zip).expect_err("zip should be rejected");
+        assert!(err.to_string().contains("assets/"));
+    }
+
+    #[test]
+    fn load_question_zip_rejects_multiple_tex_files() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("a.tex", options).unwrap();
+        writer.write_all(br"\section{A}").unwrap();
+        writer.start_file("b.tex", options).unwrap();
+        writer.write_all(br"\section{B}").unwrap();
+        writer.start_file("assets/fig.png", options).unwrap();
+        writer.write_all(b"png").unwrap();
+
+        let zip = writer.finish().unwrap().into_inner();
+        let err = load_question_zip(&zip).expect_err("zip should be rejected");
+        assert!(err.to_string().contains("exactly one .tex file"));
+    }
+
+    #[test]
+    fn load_question_zip_rejects_wrong_root_directory() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("problem.tex", options).unwrap();
+        writer.write_all(br"\section{Demo}").unwrap();
+        writer.start_file("images/fig.png", options).unwrap();
+        writer.write_all(b"png").unwrap();
+
+        let zip = writer.finish().unwrap().into_inner();
+        let err = load_question_zip(&zip).expect_err("zip should be rejected");
+        assert!(err.to_string().contains("assets/"));
+    }
+
+    #[test]
+    fn extract_problem_score_parses_score_from_tex() {
+        use super::extract_problem_score;
+
+        assert_eq!(
+            extract_problem_score(br"\begin{problem}[20]{Title}"),
+            Some(20),
+        );
+        assert_eq!(extract_problem_score(br"\begin{problem}[60]{}"), Some(60),);
+        assert_eq!(
+            extract_problem_score(br"\begin{problem}[5]{Basic}"),
+            Some(5),
+        );
+        assert_eq!(extract_problem_score(br"\section{Demo}"), None,);
+        assert_eq!(extract_problem_score(br"\begin{problem}{No bracket}"), None,);
+    }
+
+    #[test]
+    fn load_question_zip_extracts_score() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("main.tex", options).unwrap();
+        writer
+            .write_all(br"\begin{problem}[40]{Test Title}")
+            .unwrap();
+        writer.start_file("assets/fig.png", options).unwrap();
+        writer.write_all(b"png").unwrap();
+
+        let zip = writer.finish().unwrap().into_inner();
+        let loaded = load_question_zip(&zip).expect("zip should parse");
+        assert_eq!(loaded.score, Some(40));
     }
 }

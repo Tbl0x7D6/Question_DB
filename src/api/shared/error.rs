@@ -8,6 +8,47 @@ use axum::{
 use serde::Serialize;
 use serde_json::json;
 
+// ---------------------------------------------------------------------------
+// Typed domain errors (used with anyhow for automatic ApiError conversion)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub(crate) struct NotFoundError(pub(crate) String);
+
+impl std::fmt::Display for NotFoundError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for NotFoundError {}
+
+#[derive(Debug)]
+pub(crate) struct ConflictError(pub(crate) String);
+
+impl std::fmt::Display for ConflictError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ConflictError {}
+
+#[derive(Debug)]
+pub(crate) struct ValidationError(pub(crate) String);
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for ValidationError {}
+
+// ---------------------------------------------------------------------------
+// ApiError
+// ---------------------------------------------------------------------------
+
 #[derive(Debug)]
 pub(crate) struct ApiError {
     pub(crate) status: StatusCode,
@@ -24,9 +65,44 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
     pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn service_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.into(),
         }
     }
@@ -41,7 +117,17 @@ impl IntoResponse for ApiError {
 
 impl From<anyhow::Error> for ApiError {
     fn from(err: anyhow::Error) -> Self {
-        Self::internal(err.to_string())
+        if let Some(e) = err.downcast_ref::<NotFoundError>() {
+            return Self::not_found(&e.0);
+        }
+        if let Some(e) = err.downcast_ref::<ConflictError>() {
+            return Self::conflict(&e.0);
+        }
+        if let Some(e) = err.downcast_ref::<ValidationError>() {
+            return Self::bad_request(&e.0);
+        }
+        tracing::error!("internal error: {err:#}");
+        Self::internal("internal server error")
     }
 }
 

@@ -43,10 +43,11 @@ pub(crate) async fn build_quality_report(pool: &PgPool) -> Result<QualityReport>
         empty_papers: Vec::new(),
     };
 
-    let question_rows = query("SELECT question_id::text AS question_id FROM questions")
-        .fetch_all(pool)
-        .await
-        .context("query questions for quality report failed")?;
+    let question_rows =
+        query("SELECT question_id::text AS question_id FROM questions WHERE deleted_at IS NULL")
+            .fetch_all(pool)
+            .await
+            .context("query questions for quality report failed")?;
 
     for row in question_rows {
         let question_id: String = row.get("question_id");
@@ -96,7 +97,7 @@ pub(crate) async fn build_quality_report(pool: &PgPool) -> Result<QualityReport>
         SELECT p.paper_id::text AS paper_id
         FROM papers p
         LEFT JOIN paper_questions pq ON pq.paper_id = p.paper_id
-        WHERE pq.paper_id IS NULL
+        WHERE p.deleted_at IS NULL AND pq.paper_id IS NULL
         "#,
     )
     .fetch_all(pool)

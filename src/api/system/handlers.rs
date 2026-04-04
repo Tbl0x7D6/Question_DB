@@ -1,13 +1,14 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::State, Json};
 use sqlx::query;
 
-use crate::api::{shared::error::HealthResponse, AppState};
+use crate::api::{
+    shared::error::{ApiError, ApiResult, HealthResponse},
+    AppState,
+};
 
-pub(crate) async fn health(
-    State(state): State<AppState>,
-) -> Result<Json<HealthResponse>, StatusCode> {
+pub(crate) async fn health(State(state): State<AppState>) -> ApiResult<HealthResponse> {
     if let Err(_err) = query("SELECT 1").execute(&state.pool).await {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+        return Err(ApiError::service_unavailable("database is unreachable"));
     }
 
     Ok(Json(HealthResponse {

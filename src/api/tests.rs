@@ -1,16 +1,15 @@
 #[cfg(test)]
 mod tests {
-    use crate::api::{
-        papers::{models::PapersParams, queries::count_paper_binds},
-        questions::{models::QuestionsParams, queries::count_question_binds},
-    };
+    use crate::api::{papers::models::PapersParams, questions::models::QuestionsParams};
 
     #[test]
-    fn question_query_normalizes_limit_offset_and_counts_binds() {
+    fn question_query_normalizes_limit_offset_and_builds_sql() {
         let params = QuestionsParams {
             paper_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
             category: Some("none".into()),
             tag: Some("mechanics".into()),
+            score_min: None,
+            score_max: None,
             difficulty_tag: Some("human".into()),
             difficulty_min: Some(3),
             difficulty_max: Some(6),
@@ -19,23 +18,25 @@ mod tests {
             offset: Some(-10),
         };
 
-        let query = params.build_query();
-        assert_eq!(query.limit, 100);
-        assert_eq!(query.offset, 0);
-        assert_eq!(query.bind_count, count_question_binds(&params));
-        assert!(query.sql.contains("FROM question_tags qt"));
-        assert!(query.sql.contains("FROM question_difficulties qd"));
-        assert!(query.sql.contains("qd.algorithm_tag = "));
-        assert!(query.sql.contains("qd.score >= "));
-        assert!(query.sql.contains("qd.score <= "));
-        assert!(query.sql.contains("FROM paper_questions pq"));
-        assert!(query.sql.contains("COALESCE(q.description, '') ILIKE"));
-        assert!(!query.sql.contains("q.question_id::text ILIKE"));
-        assert!(!query.sql.contains("q.source_tex_path, '') ILIKE"));
+        let plan = params.build_query();
+        assert_eq!(plan.limit, 100);
+        assert_eq!(plan.offset, 0);
+        let sql = plan.builder.sql().to_owned();
+        assert!(sql.contains("WHERE q.deleted_at IS NULL"));
+        assert!(sql.contains("FROM question_tags qt"));
+        assert!(sql.contains("FROM question_difficulties qd"));
+        assert!(sql.contains("qd.algorithm_tag = "));
+        assert!(sql.contains("qd.score >= "));
+        assert!(sql.contains("qd.score <= "));
+        assert!(sql.contains("FROM paper_questions pq"));
+        assert!(sql.contains("JOIN papers p ON p.paper_id = pq.paper_id"));
+        assert!(sql.contains("p.deleted_at IS NULL"));
+        assert!(sql.contains("COALESCE(q.description, '') ILIKE"));
+        assert!(sql.contains("COUNT(*) OVER() AS total_count"));
     }
 
     #[test]
-    fn paper_query_normalizes_limit_offset_and_counts_binds() {
+    fn paper_query_normalizes_limit_offset_and_builds_sql() {
         let params = PapersParams {
             question_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
             category: Some("E".into()),
@@ -45,14 +46,14 @@ mod tests {
             offset: Some(-10),
         };
 
-        let query = params.build_query();
-        assert_eq!(query.limit, 100);
-        assert_eq!(query.offset, 0);
-        assert_eq!(query.bind_count, count_paper_binds(&params));
-        assert!(query.sql.contains("FROM paper_questions pq"));
-        assert!(query.sql.contains("JOIN question_tags qt"));
-        assert!(query
-            .sql
-            .contains("CONCAT_WS(' ', p.description, p.title, p.subtitle"));
+        let plan = params.build_query();
+        assert_eq!(plan.limit, 100);
+        assert_eq!(plan.offset, 0);
+        let sql = plan.builder.sql().to_owned();
+        assert!(sql.contains("WHERE p.deleted_at IS NULL"));
+        assert!(sql.contains("FROM paper_questions pq"));
+        assert!(sql.contains("q.deleted_at IS NULL"));
+        assert!(sql.contains("JOIN question_tags qt"));
+        assert!(sql.contains("CONCAT_WS(' ', p.description, p.title, p.subtitle"));
     }
 }
