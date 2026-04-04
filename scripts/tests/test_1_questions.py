@@ -65,6 +65,7 @@ def upload_real_questions(
     detail = parse_json(api.get(f"/questions/{ids[0]}")[1])
     assert detail["category"] == category
     assert detail["status"] in {"reviewed", "used"}
+    assert isinstance(detail["score"], int)  # real questions always have a score
     assert_question_query(
         api, f"/questions?category={category}&tag={tag}", ids,
     )
@@ -206,6 +207,9 @@ def test_filter_questions(api, state):
     page = parse_json(api.get("/questions?limit=10&offset=0")[1])
     assert len(page["items"]) == 3
     assert page["total"] == 3
+    # All synthetic questions have score=20 from \begin{problem}[20]
+    for item in page["items"]:
+        assert item["score"] == 20
 
     qs = state.q_by_slug
 
@@ -244,6 +248,25 @@ def test_filter_questions(api, state):
         "/questions?difficulty_tag=human&difficulty_min=8&difficulty_max=3",
         expect=400,
     )
+    # Invalid: score_min > score_max
+    api.get("/questions?score_min=50&score_max=10", expect=400)
+
+    # Score filter: all synthetic questions have score=20
+    assert_question_query(
+        api,
+        "/questions?score_min=20&score_max=20",
+        list(qs.values()),
+    )
+    assert_question_query(
+        api,
+        "/questions?score_min=21",
+        [],
+    )
+    assert_question_query(
+        api,
+        "/questions?score_max=19",
+        [],
+    )
 
 
 def test_question_detail(api, state):
@@ -252,10 +275,12 @@ def test_question_detail(api, state):
     m = parse_json(api.get(f"/questions/{qs['mechanics']}")[1])
     assert m["difficulty"]["human"]["score"] == 4
     assert m["difficulty"]["heuristic"]["notes"] == "fast estimate"
+    assert m["score"] == 20  # from \begin{problem}[20]
 
     o = parse_json(api.get(f"/questions/{qs['optics']}")[1])
     assert o["difficulty"]["symbolic"]["score"] == 9
     assert o["difficulty"]["ml"]["notes"] == "vision model struggle"
+    assert o["score"] == 20  # from \begin{problem}[20]
 
 
 def test_question_bundle(api, state):
@@ -306,6 +331,7 @@ def test_question_file_replacement(api, state):
     assert replaced["difficulty"] == original["difficulty"]
     assert replaced["status"] == original["status"]
     assert replaced["description"] == original["description"]
+    assert replaced["score"] == original["score"]  # same tex template, score preserved
     assert replaced["tex_object_id"] != original["tex_object_id"]
     assert replaced["updated_at"] != original["updated_at"]
 

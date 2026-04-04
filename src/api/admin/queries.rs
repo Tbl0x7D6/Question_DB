@@ -30,6 +30,7 @@ pub(crate) async fn list_admin_questions(
                q.category,
                q.status,
                COALESCE(q.description, '') AS description,
+               q.score,
                q.author,
                q.reviewers,
                to_char(q.created_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS created_at,
@@ -53,6 +54,12 @@ pub(crate) async fn list_admin_questions(
             )
             .push_bind(tag)
             .push(")");
+    }
+    if let Some(score_min) = params.score_min {
+        builder.push(" AND q.score >= ").push_bind(score_min);
+    }
+    if let Some(score_max) = params.score_max {
+        builder.push(" AND q.score <= ").push_bind(score_max);
     }
     if let Some(difficulty_tag) = &params.difficulty_tag {
         builder
@@ -113,7 +120,10 @@ pub(crate) async fn list_admin_questions(
         let deleted_at: Option<String> = row.get("deleted_at");
         let deleted_by: Option<String> = row.get("deleted_by");
         let tags = tags_map.get(&question_id).cloned().unwrap_or_default();
-        let difficulty = difficulty_map.get(&question_id).cloned().unwrap_or_default();
+        let difficulty = difficulty_map
+            .get(&question_id)
+            .cloned()
+            .unwrap_or_default();
         questions.push(admin_question_summary(
             map_question_summary(row, tags, difficulty),
             deleted_at,
@@ -174,9 +184,7 @@ pub(crate) async fn list_admin_papers(
     if let Some(search) = &params.q {
         let needle = format!("%{}%", escape_ilike(search));
         builder
-            .push(
-                " AND CONCAT_WS(' ', p.description, p.title, p.subtitle) ILIKE ",
-            )
+            .push(" AND CONCAT_WS(' ', p.description, p.title, p.subtitle) ILIKE ")
             .push_bind(needle);
     }
 
@@ -500,9 +508,7 @@ async fn count_admin_papers(
     if let Some(search) = &params.q {
         let needle = format!("%{}%", escape_ilike(search));
         builder
-            .push(
-                " AND CONCAT_WS(' ', p.description, p.title, p.subtitle) ILIKE ",
-            )
+            .push(" AND CONCAT_WS(' ', p.description, p.title, p.subtitle) ILIKE ")
             .push_bind(needle);
     }
     let row = builder

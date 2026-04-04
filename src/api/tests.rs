@@ -1,9 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::api::{
-        papers::models::PapersParams,
-        questions::models::QuestionsParams,
-    };
+    use crate::api::{papers::models::PapersParams, questions::models::QuestionsParams};
 
     #[test]
     fn question_query_normalizes_limit_offset_and_builds_sql() {
@@ -11,6 +8,8 @@ mod tests {
             paper_id: Some("550e8400-e29b-41d4-a716-446655440000".into()),
             category: Some("none".into()),
             tag: Some("mechanics".into()),
+            score_min: None,
+            score_max: None,
             difficulty_tag: Some("human".into()),
             difficulty_min: Some(3),
             difficulty_max: Some(6),

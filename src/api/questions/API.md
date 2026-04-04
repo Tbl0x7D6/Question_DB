@@ -40,6 +40,10 @@
   - `author = ""`
   - `reviewers = []`
 - `created_at = NOW()`
+- `score` 会自动从 tex 文件中的 `\begin{problem}[<score>]` 标记提取
+  - 整数类型
+  - 如果 tex 中不包含该标记，则为 `null`
+  - 不支持通过 PATCH 手动更新
 
 成功响应：
 
@@ -91,6 +95,7 @@
   - 删除题目当前关联的 tex / asset 文件对象
   - 写入新 zip 中的 tex / asset 文件
   - 更新 `source_tex_path`
+  - 重新提取 `score`（从新 tex 文件的 `\begin{problem}[<score>]`）
   - 更新 `updated_at`
 - 原有 metadata 会保留：
   - `category`
@@ -147,6 +152,8 @@
 - `paper_id`
 - `category`
 - `tag`
+- `score_min`
+- `score_max`
 - `difficulty_tag`
 - `difficulty_min`
 - `difficulty_max`
@@ -157,6 +164,8 @@
 
 说明：
 
+- `score_min` / `score_max` 可单独使用，也可组合使用
+- `score_min` 必须 ≤ `score_max`（如同时提供）
 - `difficulty_min` / `difficulty_max` 需要和 `difficulty_tag` 一起使用
 - difficulty 过滤会匹配指定 tag 上的 score 范围
 

@@ -22,6 +22,8 @@
 - `paper_id`
 - `category`
 - `tag`
+- `score_min`
+- `score_max`
 - `difficulty_tag`
 - `difficulty_min`
 - `difficulty_max`

@@ -42,6 +42,7 @@ impl QuestionsParams {
                    q.category,
                    q.status,
                    COALESCE(q.description, '') AS description,
+                   q.score,
                    q.author,
                    q.reviewers,
                    to_char(q.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS created_at,
@@ -59,6 +60,12 @@ impl QuestionsParams {
                 .push(" AND EXISTS (SELECT 1 FROM question_tags qt WHERE qt.question_id = q.question_id AND qt.tag = ")
                 .push_bind(tag)
                 .push(")");
+        }
+        if let Some(score_min) = self.score_min {
+            builder.push(" AND q.score >= ").push_bind(score_min);
+        }
+        if let Some(score_max) = self.score_max {
+            builder.push(" AND q.score <= ").push_bind(score_max);
         }
         if let Some(difficulty_tag) = &self.difficulty_tag {
             builder
@@ -105,6 +112,21 @@ pub(crate) fn validate_question_filters(params: &QuestionsParams) -> Result<()> 
     if let Some(category) = &params.category {
         validate_question_category(category)
             .map_err(|_| anyhow!("category must be one of: none, T, E"))?;
+    }
+    if let Some(score_min) = params.score_min {
+        if score_min < 0 {
+            return Err(anyhow!("score_min must be non-negative"));
+        }
+    }
+    if let Some(score_max) = params.score_max {
+        if score_max < 0 {
+            return Err(anyhow!("score_max must be non-negative"));
+        }
+    }
+    if let (Some(score_min), Some(score_max)) = (params.score_min, params.score_max) {
+        if score_min > score_max {
+            return Err(anyhow!("score_min must be less than or equal to score_max"));
+        }
     }
     if let Some(difficulty_tag) = &params.difficulty_tag {
         if difficulty_tag.trim().is_empty() {
@@ -303,6 +325,7 @@ pub(crate) fn map_question_summary(
         category: row.get("category"),
         status: row.get("status"),
         description: row.get("description"),
+        score: row.get("score"),
         author: row.get("author"),
         reviewers: row.get("reviewers"),
         tags,
@@ -339,6 +362,7 @@ pub(crate) fn map_question_detail(
         category: row.get("category"),
         status: row.get("status"),
         description: row.get("description"),
+        score: row.get("score"),
         author: row.get("author"),
         reviewers: row.get("reviewers"),
         tags,

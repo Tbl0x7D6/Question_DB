@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use mime_guess::MimeGuess;
+use regex::Regex;
 use sqlx::{query, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 use zip::ZipArchive;
@@ -34,6 +35,7 @@ struct ArchiveFile {
 struct LoadedQuestionZip {
     tex_file: ArchiveFile,
     asset_files: Vec<ArchiveFile>,
+    score: Option<i32>,
 }
 
 pub(crate) async fn import_question_zip(
@@ -59,10 +61,10 @@ pub(crate) async fn import_question_zip(
     query(
         r#"
         INSERT INTO questions (
-            question_id, source_tex_path, category, status, description, author, reviewers, created_at, updated_at
+            question_id, source_tex_path, category, status, description, score, author, reviewers, created_at, updated_at
         )
         VALUES (
-            $1::uuid, $2, $3, $4, $5, $6, $7, NOW(), NOW()
+            $1::uuid, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
         )
         "#,
     )
@@ -71,6 +73,7 @@ pub(crate) async fn import_question_zip(
     .bind(&request.category)
     .bind(&request.status)
     .bind(&request.description)
+    .bind(loaded.score)
     .bind(&request.author)
     .bind(&request.reviewers)
     .execute(&mut *tx)
@@ -128,10 +131,11 @@ pub(crate) async fn replace_question_zip(
     replace_question_files_tx(&mut tx, question_id, &loaded).await?;
 
     query(
-        "UPDATE questions SET source_tex_path = $2, updated_at = NOW() WHERE question_id = $1::uuid",
+        "UPDATE questions SET source_tex_path = $2, score = $3, updated_at = NOW() WHERE question_id = $1::uuid",
     )
     .bind(question_id)
     .bind(&loaded.tex_file.path)
+    .bind(loaded.score)
     .execute(&mut *tx)
     .await
     .context("update question source tex path failed")?;
@@ -182,10 +186,12 @@ fn load_question_zip(zip_bytes: &[u8]) -> Result<LoadedQuestionZip> {
     }
 
     let (tex_file, asset_files) = validate_standard_layout(&files, &directories)?;
+    let score = extract_problem_score(&tex_file.bytes);
 
     Ok(LoadedQuestionZip {
         tex_file,
         asset_files,
+        score,
     })
 }
 
@@ -275,6 +281,16 @@ fn is_tex_file(path: &str) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("tex"))
         .unwrap_or(false)
+}
+
+/// Extract the score from a `\begin{problem}[<score>]` marker in a TeX file.
+/// Returns `None` if no such marker is found or the content is not valid UTF-8.
+fn extract_problem_score(tex_bytes: &[u8]) -> Option<i32> {
+    let content = std::str::from_utf8(tex_bytes).ok()?;
+    let re = Regex::new(r"\\begin\{problem\}\[(\d+)\]").ok()?;
+    re.captures(content)
+        .and_then(|caps| caps.get(1))
+        .and_then(|m| m.as_str().parse::<i32>().ok())
 }
 
 fn register_parent_directories(directories: &mut BTreeSet<String>, path: &str) {
@@ -463,6 +479,7 @@ mod tests {
         let loaded = load_question_zip(&build_zip()).expect("zip should parse");
         assert_eq!(loaded.tex_file.path, "problem.tex");
         assert_eq!(loaded.asset_files.len(), 1);
+        assert_eq!(loaded.score, None);
     }
 
     #[test]
@@ -586,5 +603,40 @@ mod tests {
         let zip = writer.finish().unwrap().into_inner();
         let err = load_question_zip(&zip).expect_err("zip should be rejected");
         assert!(err.to_string().contains("assets/"));
+    }
+
+    #[test]
+    fn extract_problem_score_parses_score_from_tex() {
+        use super::extract_problem_score;
+
+        assert_eq!(
+            extract_problem_score(br"\begin{problem}[20]{Title}"),
+            Some(20),
+        );
+        assert_eq!(extract_problem_score(br"\begin{problem}[60]{}"), Some(60),);
+        assert_eq!(
+            extract_problem_score(br"\begin{problem}[5]{Basic}"),
+            Some(5),
+        );
+        assert_eq!(extract_problem_score(br"\section{Demo}"), None,);
+        assert_eq!(extract_problem_score(br"\begin{problem}{No bracket}"), None,);
+    }
+
+    #[test]
+    fn load_question_zip_extracts_score() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("main.tex", options).unwrap();
+        writer
+            .write_all(br"\begin{problem}[40]{Test Title}")
+            .unwrap();
+        writer.start_file("assets/fig.png", options).unwrap();
+        writer.write_all(b"png").unwrap();
+
+        let zip = writer.finish().unwrap().into_inner();
+        let loaded = load_question_zip(&zip).expect("zip should parse");
+        assert_eq!(loaded.score, Some(40));
     }
 }

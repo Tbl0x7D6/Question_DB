@@ -17,10 +17,7 @@ use crate::api::{
         models::QuestionSourceRef,
         queries::{load_question_difficulties, load_question_files, load_question_tags},
     },
-    shared::{
-        db::fetch_text_object,
-        utils::canonical_or_original,
-    },
+    shared::{db::fetch_text_object, utils::canonical_or_original},
 };
 
 pub(crate) fn default_export_path(format: ExportFormat, is_public: bool) -> PathBuf {
@@ -52,7 +49,7 @@ pub(crate) async fn export_jsonl(
     let rows = query(
         r#"
         SELECT question_id::text AS question_id, source_tex_path, category, status,
-               COALESCE(description, '') AS description,
+               COALESCE(description, '') AS description, score,
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM questions
@@ -92,6 +89,7 @@ pub(crate) async fn export_jsonl(
             "category": row.get::<String, _>("category"),
             "status": row.get::<String, _>("status"),
             "description": row.get::<String, _>("description"),
+            "score": row.get::<Option<i32>, _>("score"),
             "difficulty": difficulty,
             "tags": tags,
             "assets": assets,
@@ -122,7 +120,7 @@ pub(crate) async fn export_csv(
     let rows = query(
         r#"
         SELECT question_id::text AS question_id, source_tex_path, category, status,
-               COALESCE(description, '') AS description,
+               COALESCE(description, '') AS description, score,
                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM questions
@@ -149,6 +147,7 @@ pub(crate) async fn export_csv(
         "category",
         "status",
         "description",
+        "score",
         "difficulty",
         "tags",
         "created_at",
@@ -166,6 +165,11 @@ pub(crate) async fn export_csv(
             .map(|file| file.object_id.clone())
             .unwrap_or_default();
 
+        let score_str = row
+            .get::<Option<i32>, _>("score")
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
         writer.write_record([
             question_id,
             tex_object_id.clone(),
@@ -173,6 +177,7 @@ pub(crate) async fn export_csv(
             row.get::<String, _>("category"),
             row.get::<String, _>("status"),
             row.get::<String, _>("description"),
+            score_str,
             serde_json::to_string(&difficulty)?,
             serde_json::to_string(&tags)?,
             row.get::<String, _>("created_at"),

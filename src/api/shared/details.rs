@@ -52,6 +52,7 @@ pub(crate) async fn load_question_detail(
         r#"
         SELECT q.question_id::text AS question_id, q.source_tex_path, q.category, q.status,
                COALESCE(q.description, '') AS description,
+               q.score,
                q.author,
                q.reviewers,
                to_char(q.created_at AT TIME ZONE 'UTC', {TIMESTAMP_SQL}) AS created_at,

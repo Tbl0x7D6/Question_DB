@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS questions (
     category TEXT NOT NULL DEFAULT 'none' CHECK (category IN ('none', 'T', 'E')),
     status TEXT NOT NULL DEFAULT 'none' CHECK (status IN ('none', 'reviewed', 'used')),
     description TEXT NOT NULL CHECK (btrim(description) <> ''),
+    score INT,
     author TEXT NOT NULL DEFAULT '',
     reviewers TEXT[] NOT NULL DEFAULT '{}',
     deleted_at TIMESTAMPTZ,
