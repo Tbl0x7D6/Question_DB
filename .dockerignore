@@ -1,0 +1,12 @@
+target
+tmp
+.git
+.gitmodules
+.pytest_cache
+__pycache__
+scripts
+tests
+*.log
+.env
+.env.*
+!.env.example

@@ -277,7 +277,7 @@ curl -X POST http://127.0.0.1:8080/papers \
 说明：
 
 - 普通 `/questions` 和 `/papers` 接口默认只返回未软删除记录
-- 管理员查询、恢复和垃圾回收见 [Admin API](/home/be/Question_DB/src/api/admin/API.md)
+- 管理员查询、恢复和垃圾回收见 [Admin API](./src/api/admin/API.md)
 - `POST /exports/run` 只导出未软删除题目
 - `POST /quality-checks/run` 只检查未软删除题目和试卷
 
@@ -289,9 +289,31 @@ export QB_BIND_ADDR='127.0.0.1:8080'
 export QB_EXPORT_DIR='./exports'            # 导出文件根目录（默认 ./exports）
 # export QB_MAX_DB_CONNECTIONS=10           # 可选，连接池上限
 # export QB_CORS_ORIGINS='http://localhost:3000,http://localhost:5173'  # 可选，CORS 白名单
-psql "$QB_DATABASE_URL" -f migrations/0001_init_pg.sql
+# export QB_JWT_SECRET='qb-dev-secret-change-me-in-production'          # 生产环境必须修改
+for file in migrations/*.sql; do
+  psql "$QB_DATABASE_URL" -v ON_ERROR_STOP=1 -f "$file"
+done
 cargo run
 ```
+
+## Docker 部署
+
+仓库现在提供了完整的生产部署样例：
+
+- [Dockerfile](./Dockerfile)
+- [docker-compose.prod.yml](./docker-compose.prod.yml)
+- [compose.prod.env.example](./compose.prod.env.example)
+- [DEPLOYMENT.md](./docs/DEPLOYMENT.md)
+
+快速启动：
+
+```bash
+cp compose.prod.env.example .env
+docker build -t qb_api:latest .
+docker compose --env-file .env -f docker-compose.prod.yml up -d
+```
+
+部署说明、升级方式、备份建议和生产注意事项见 [DEPLOYMENT.md](./docs/DEPLOYMENT.md)。
 
 ## 测试
 
@@ -309,4 +331,4 @@ python3 scripts/test_full_flow.py
 
 ## 数据库格式
 
-表结构定义在 [0001_init_pg.sql](/home/be/Question_DB/migrations/0001_init_pg.sql)。
+表结构定义在 [0001_init_pg.sql](./migrations/0001_init_pg.sql)。
