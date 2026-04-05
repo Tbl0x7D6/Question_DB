@@ -61,7 +61,7 @@ pub(crate) struct PapersParams {
 #[derive(Debug, Serialize)]
 pub(crate) struct PaperImportResponse {
     pub(crate) paper_id: String,
-    pub(crate) file_name: String,
+    pub(crate) file_name: Option<String>,
     pub(crate) status: &'static str,
     pub(crate) question_count: usize,
 }

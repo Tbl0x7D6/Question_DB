@@ -53,12 +53,6 @@ cp compose.prod.env.example .env
 docker compose --env-file .env -f docker-compose.prod.yml up -d
 ```
 
-如果你的机器仍然使用旧命令，也可以写成：
-
-```bash
-docker-compose --env-file .env -f docker-compose.prod.yml up -d
-```
-
 如果你想跳过单独的 `docker build` 步骤，也可以直接：
 
 ```bash
@@ -146,15 +140,44 @@ compose 文件里定义了两个命名卷：
 备份数据库：
 
 ```bash
-docker compose --env-file .env -f docker-compose.prod.yml exec db \
-  pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > qb_backup.sql
+docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > qb_backup.sql
 ```
 
 恢复数据库：
 
 ```bash
 cat qb_backup.sql | docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
-  psql -U "$POSTGRES_USER" "$POSTGRES_DB"
+  sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'
+```
+
+注意：上面的备份文件是 `pg_dump` 导出的 plain SQL，恢复目标必须是空库；如果直接导入到已有数据的库里，会出现 “relation already exists” 和主键冲突。
+
+如果你要覆盖当前库，建议按下面顺序操作：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml stop api
+docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"'
+cat qb_backup.sql | docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'
+docker compose --env-file .env -f docker-compose.prod.yml start api
+```
+
+如果你只是想验证备份可恢复，建议恢复到一个临时数据库，而不是直接覆盖生产库：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'createdb -U "$POSTGRES_USER" qb_restore_test'
+cat qb_backup.sql | docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" qb_restore_test'
+```
+
+验证完后删除测试库：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'dropdb -U "$POSTGRES_USER" qb_restore_test'
 ```
 
 如果你需要保留导出产物，也要同步备份 `qb_exports` 这个卷。

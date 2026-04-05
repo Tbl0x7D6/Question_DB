@@ -19,25 +19,14 @@ pub(crate) async fn import_paper_zip(
     request: &NormalizedCreatePaperRequest,
     zip_bytes: Vec<u8>,
 ) -> Result<PaperImportResponse> {
-    if zip_bytes.is_empty() {
-        return Err(ValidationError("uploaded file is empty".into()).into());
-    }
-    if zip_bytes.len() > MAX_UPLOAD_BYTES {
-        return Err(ValidationError("uploaded zip exceeds 20 MiB limit".into()).into());
-    }
-
-    validate_uploaded_zip(&zip_bytes)?;
-
     let paper_id = Uuid::new_v4().to_string();
-    let normalized_file_name = normalize_upload_file_name(file_name, "paper.zip");
+    let normalized_file_name = normalize_optional_paper_file_name(file_name, &zip_bytes)?;
     let mut tx = pool.begin().await.context("begin paper import tx failed")?;
-    let append_object_id = insert_object_tx(
-        &mut tx,
-        &normalized_file_name,
-        &zip_bytes,
-        Some("application/zip"),
-    )
-    .await?;
+    let append_object_id = if let Some(file_name) = normalized_file_name.as_deref() {
+        Some(insert_object_tx(&mut tx, file_name, &zip_bytes, Some("application/zip")).await?)
+    } else {
+        None
+    };
 
     query(
         r#"
@@ -52,7 +41,7 @@ pub(crate) async fn import_paper_zip(
     .bind(&request.description)
     .bind(&request.title)
     .bind(&request.subtitle)
-    .bind(&append_object_id)
+    .bind(append_object_id.as_deref())
     .execute(&mut *tx)
     .await
     .context("insert paper failed")?;
@@ -110,7 +99,7 @@ pub(crate) async fn replace_paper_zip(
     .fetch_optional(&mut *tx)
     .await
     .context("load paper appendix reference failed")?
-    .map(|row| row.get::<String, _>("append_object_id"))
+    .map(|row| row.get::<Option<String>, _>("append_object_id"))
     .ok_or_else(|| NotFoundError(format!("paper not found: {paper_id}")))?;
 
     let append_object_id = insert_object_tx(
@@ -128,11 +117,13 @@ pub(crate) async fn replace_paper_zip(
         .await
         .context("update paper appendix object failed")?;
 
-    query("DELETE FROM objects WHERE object_id = $1::uuid")
-        .bind(&previous_object_id)
-        .execute(&mut *tx)
-        .await
-        .context("delete previous paper appendix object failed")?;
+    if let Some(previous_object_id) = previous_object_id {
+        query("DELETE FROM objects WHERE object_id = $1::uuid")
+            .bind(&previous_object_id)
+            .execute(&mut *tx)
+            .await
+            .context("delete previous paper appendix object failed")?;
+    }
 
     tx.commit()
         .await
@@ -151,9 +142,24 @@ fn validate_uploaded_zip(zip_bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn normalize_optional_paper_file_name(
+    file_name: Option<&str>,
+    zip_bytes: &[u8],
+) -> Result<Option<String>> {
+    if zip_bytes.is_empty() {
+        return Ok(None);
+    }
+    if zip_bytes.len() > MAX_UPLOAD_BYTES {
+        return Err(ValidationError("uploaded zip exceeds 20 MiB limit".into()).into());
+    }
+
+    validate_uploaded_zip(zip_bytes)?;
+    Ok(Some(normalize_upload_file_name(file_name, "paper.zip")))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{validate_uploaded_zip, MAX_UPLOAD_BYTES};
+    use super::{normalize_optional_paper_file_name, validate_uploaded_zip, MAX_UPLOAD_BYTES};
     use std::io::Write;
     use zip::{write::SimpleFileOptions, ZipWriter};
 
@@ -179,6 +185,23 @@ mod tests {
     fn validate_uploaded_zip_rejects_invalid_zip_bytes() {
         let err = validate_uploaded_zip(b"not-a-zip").expect_err("should reject");
         assert!(err.to_string().contains("invalid zip archive"));
+    }
+
+    #[test]
+    fn normalize_optional_paper_file_name_accepts_missing_upload() {
+        assert_eq!(
+            normalize_optional_paper_file_name(None, &[]).expect("empty upload should be allowed"),
+            None
+        );
+    }
+
+    #[test]
+    fn normalize_optional_paper_file_name_returns_normalized_name_for_zip() {
+        assert_eq!(
+            normalize_optional_paper_file_name(Some("nested/paper_appendix.zip"), &build_zip())
+                .expect("zip should validate"),
+            Some("paper_appendix.zip".into())
+        );
     }
 
     #[test]
