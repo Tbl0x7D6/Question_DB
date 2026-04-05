@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - qb_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    image: ${QB_IMAGE_NAME:-qb_api}:${QB_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      QB_DATABASE_URL: ${QB_DATABASE_URL}
+      QB_BIND_ADDR: 0.0.0.0:8080
+      QB_EXPORT_DIR: ${QB_EXPORT_DIR:-/var/lib/qb/exports}
+      QB_MAX_DB_CONNECTIONS: ${QB_MAX_DB_CONNECTIONS:-20}
+      QB_CORS_ORIGINS: ${QB_CORS_ORIGINS:-}
+      QB_JWT_SECRET: ${QB_JWT_SECRET}
+    ports:
+      - "${QB_BIND_PORT:-8080}:8080"
+    volumes:
+      - qb_exports:${QB_EXPORT_DIR:-/var/lib/qb/exports}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/health >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  qb_postgres_data:
+  qb_exports:

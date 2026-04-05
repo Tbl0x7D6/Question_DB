@@ -1,0 +1,190 @@
+# Deployment Guide
+
+本文档给出一套适合当前仓库的生产部署方式：用 Docker 构建后端镜像，再用 `docker compose` 编排 API 和 PostgreSQL。
+
+## 部署内容
+
+- `Dockerfile`: 多阶段构建 Rust 后端镜像
+- `docker/entrypoint.sh`: 容器启动时等待数据库，并按文件名顺序执行 `migrations/*.sql`
+- `docker-compose.prod.yml`: 生产编排文件，包含 `api` 和 `db`
+- `compose.prod.env.example`: 生产环境变量示例
+
+## 1. 构建镜像
+
+在仓库根目录执行：
+
+```bash
+docker build --pull -t qb_api:latest .
+```
+
+如果你要推到镜像仓库，可以直接换成自己的 tag：
+
+```bash
+docker build --pull -t registry.example.com/cphos/qb_api:2026-04-05 .
+docker push registry.example.com/cphos/qb_api:2026-04-05
+```
+
+对应地，把 `compose.prod.env.example` 里的 `QB_IMAGE_NAME` 和 `QB_IMAGE_TAG` 改成你的仓库地址和版本号即可。
+
+## 2. 准备环境变量
+
+先复制一份示例文件：
+
+```bash
+cp compose.prod.env.example .env
+```
+
+至少要修改这些值：
+
+- `POSTGRES_PASSWORD`
+- `QB_DATABASE_URL`
+- `QB_JWT_SECRET`
+- `QB_CORS_ORIGINS`
+
+注意：
+
+- `QB_DATABASE_URL` 必须和 `POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 保持一致
+- 如果数据库密码里包含 `@`、`:`、`/` 之类特殊字符，需要做 URL 编码再写进 `QB_DATABASE_URL`
+- `QB_JWT_SECRET` 请使用长随机字符串，生产环境不要沿用默认值
+
+## 3. 启动生产环境
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml up -d
+```
+
+如果你想跳过单独的 `docker build` 步骤，也可以直接：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml up -d --build
+```
+
+启动流程如下：
+
+1. `db` 容器启动并通过健康检查
+2. `api` 容器启动，等待 PostgreSQL 可连接
+3. `api` 容器自动执行 `migrations/*.sql`
+4. 后端服务监听 `0.0.0.0:8080`
+5. 如果 `users` 表为空，会自动创建初始管理员账号 `admin / changeme`
+
+首次上线后请立即登录并修改默认管理员密码。
+
+## 4. 验证部署结果
+
+查看容器状态：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml ps
+```
+
+查看后端日志：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml logs -f api
+```
+
+健康检查：
+
+```bash
+curl http://127.0.0.1:${QB_BIND_PORT:-8080}/health
+```
+
+正常情况下会返回：
+
+```json
+{"status":"ok","service":"qb_api_rust"}
+```
+
+## 5. 升级和重启
+
+代码更新后重新部署：
+
+```bash
+git pull
+docker build -t qb_api:latest .
+docker compose --env-file .env -f docker-compose.prod.yml up -d
+```
+
+如果镜像来自外部仓库：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml pull
+docker compose --env-file .env -f docker-compose.prod.yml up -d
+```
+
+停止服务：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml down
+```
+
+如果连数据卷也一起删除：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml down -v
+```
+
+这会删除 PostgreSQL 数据和导出目录，请谨慎执行。
+
+## 6. 数据持久化
+
+compose 文件里定义了两个命名卷：
+
+- `qb_postgres_data`: PostgreSQL 数据目录
+- `qb_exports`: `QB_EXPORT_DIR` 对应的导出目录，保存导出和质量检查输出
+
+题目 zip、试卷 zip 和资源文件本身都保存在 PostgreSQL 的 `objects` 表里，不依赖本地文件系统。
+
+## 7. 备份建议
+
+备份数据库：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > qb_backup.sql
+```
+
+恢复数据库：
+
+```bash
+cat qb_backup.sql | docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'
+```
+
+注意：上面的备份文件是 `pg_dump` 导出的 plain SQL，恢复目标必须是空库；如果直接导入到已有数据的库里，会出现 “relation already exists” 和主键冲突。
+
+如果你要覆盖当前库，建议按下面顺序操作：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml stop api
+docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"'
+cat qb_backup.sql | docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" "$POSTGRES_DB"'
+docker compose --env-file .env -f docker-compose.prod.yml start api
+```
+
+如果你只是想验证备份可恢复，建议恢复到一个临时数据库，而不是直接覆盖生产库：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'createdb -U "$POSTGRES_USER" qb_restore_test'
+cat qb_backup.sql | docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" qb_restore_test'
+```
+
+验证完后删除测试库：
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml exec -T db \
+  sh -lc 'dropdb -U "$POSTGRES_USER" qb_restore_test'
+```
+
+如果你需要保留导出产物，也要同步备份 `qb_exports` 这个卷。
+
+## 8. 运维说明
+
+- 当前 compose 文件默认只部署单实例 `api`
+- 由于容器启动时会自动执行 migration，如果未来要扩成多副本，建议把 migration 拆成独立 Job 或手动步骤
+- 对外提供服务时，建议在前面加 Nginx、Traefik 或云负载均衡，统一处理 HTTPS 和域名
+- 如果只允许前端域名访问 API，请把 `QB_CORS_ORIGINS` 配成明确的生产域名列表

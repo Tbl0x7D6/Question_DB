@@ -185,6 +185,7 @@ fn load_question_zip(zip_bytes: &[u8]) -> Result<LoadedQuestionZip> {
         files.insert(path.clone(), ArchiveFile { path, bytes });
     }
 
+    let (files, directories) = normalize_archive_root(files, directories);
     let (tex_file, asset_files) = validate_standard_layout(&files, &directories)?;
     let score = extract_problem_score(&tex_file.bytes);
 
@@ -218,6 +219,47 @@ fn sanitize_archive_path(path: &str) -> Result<String> {
         bail!("zip entry has empty path");
     }
     Ok(joined)
+}
+
+fn normalize_archive_root(
+    files: BTreeMap<String, ArchiveFile>,
+    directories: BTreeSet<String>,
+) -> (BTreeMap<String, ArchiveFile>, BTreeSet<String>) {
+    let has_root_file = files.keys().any(|path| !path.contains('/'));
+    let root_directories = directories
+        .iter()
+        .filter(|dir| !dir.contains('/'))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if has_root_file || root_directories.len() != 1 {
+        return (files, directories);
+    }
+
+    let root_directory = &root_directories[0];
+    let prefix = format!("{root_directory}/");
+
+    let normalized_files = files
+        .into_values()
+        .filter_map(|mut file| {
+            let stripped = file.path.strip_prefix(&prefix)?.to_string();
+            file.path = stripped.clone();
+            Some((stripped, file))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let normalized_directories = directories
+        .into_iter()
+        .filter_map(|directory| {
+            if directory == *root_directory {
+                None
+            } else {
+                directory.strip_prefix(&prefix).map(str::to_string)
+            }
+        })
+        .collect::<BTreeSet<_>>();
+
+    (normalized_files, normalized_directories)
 }
 
 fn validate_standard_layout(
@@ -265,11 +307,8 @@ fn validate_standard_layout(
         );
     }
 
-    if !root_directories.iter().any(|dir| dir == "assets") {
-        bail!("zip root must contain exactly one assets/ directory");
-    }
-    if root_directories.len() != 1 {
-        bail!("zip root must contain exactly one directory named assets/");
+    if root_directories.iter().any(|dir| dir != "assets") {
+        bail!("zip root may only contain one optional assets/ directory");
     }
 
     Ok((root_tex_files.remove(0), asset_files))
@@ -558,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn load_question_zip_rejects_missing_assets_directory() {
+    fn load_question_zip_accepts_missing_assets_directory() {
         let cursor = std::io::Cursor::new(Vec::new());
         let mut writer = ZipWriter::new(cursor);
         let options = SimpleFileOptions::default();
@@ -567,8 +606,9 @@ mod tests {
         writer.write_all(br"\section{Demo}").unwrap();
 
         let zip = writer.finish().unwrap().into_inner();
-        let err = load_question_zip(&zip).expect_err("zip should be rejected");
-        assert!(err.to_string().contains("assets/"));
+        let loaded = load_question_zip(&zip).expect("zip should parse");
+        assert_eq!(loaded.tex_file.path, "problem.tex");
+        assert!(loaded.asset_files.is_empty());
     }
 
     #[test]
@@ -603,6 +643,41 @@ mod tests {
         let zip = writer.finish().unwrap().into_inner();
         let err = load_question_zip(&zip).expect_err("zip should be rejected");
         assert!(err.to_string().contains("assets/"));
+    }
+
+    #[test]
+    fn load_question_zip_accepts_single_wrapping_directory() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("wrapped/problem.tex", options).unwrap();
+        writer.write_all(br"\section{Demo}").unwrap();
+        writer
+            .start_file("wrapped/assets/fig.png", options)
+            .unwrap();
+        writer.write_all(b"png").unwrap();
+
+        let zip = writer.finish().unwrap().into_inner();
+        let loaded = load_question_zip(&zip).expect("zip should parse");
+        assert_eq!(loaded.tex_file.path, "problem.tex");
+        assert_eq!(loaded.asset_files.len(), 1);
+        assert_eq!(loaded.asset_files[0].path, "assets/fig.png");
+    }
+
+    #[test]
+    fn load_question_zip_accepts_wrapping_directory_without_assets() {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("wrapped/problem.tex", options).unwrap();
+        writer.write_all(br"\section{Demo}").unwrap();
+
+        let zip = writer.finish().unwrap().into_inner();
+        let loaded = load_question_zip(&zip).expect("zip should parse");
+        assert_eq!(loaded.tex_file.path, "problem.tex");
+        assert!(loaded.asset_files.is_empty());
     }
 
     #[test]

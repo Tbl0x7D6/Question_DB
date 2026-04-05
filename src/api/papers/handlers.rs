@@ -97,7 +97,9 @@ pub(crate) async fn create_paper(
         }
     }
 
-    validate_upload_size(&bytes, MAX_UPLOAD_BYTES)?;
+    if !bytes.is_empty() {
+        validate_upload_size(&bytes, MAX_UPLOAD_BYTES)?;
+    }
 
     let request = CreatePaperRequest {
         description: description.ok_or_else(|| {

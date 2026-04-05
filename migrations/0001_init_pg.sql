@@ -1,4 +1,4 @@
--- PostgreSQL initial schema for ZIP-uploaded questions and assembled papers.
+-- PostgreSQL initial schema for application data and authentication.
 
 CREATE TABLE IF NOT EXISTS objects (
     object_id UUID PRIMARY KEY,
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS papers (
     description TEXT NOT NULL CHECK (btrim(description) <> ''),
     title TEXT NOT NULL CHECK (btrim(title) <> ''),
     subtitle TEXT NOT NULL CHECK (btrim(subtitle) <> ''),
-    append_object_id UUID NOT NULL REFERENCES objects(object_id),
+    append_object_id UUID REFERENCES objects(object_id),
     deleted_at TIMESTAMPTZ,
     deleted_by TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -72,6 +72,27 @@ CREATE TABLE IF NOT EXISTS paper_questions (
     UNIQUE (paper_id, sort_order)
 );
 
+CREATE TABLE IF NOT EXISTS users (
+    user_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username      TEXT NOT NULL UNIQUE,
+    display_name  TEXT NOT NULL DEFAULT '',
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'viewer'
+                  CHECK (role IN ('viewer', 'editor', 'admin')),
+    is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+    token_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    token_hash  TEXT NOT NULL UNIQUE,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    revoked_at  TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
 CREATE INDEX IF NOT EXISTS idx_questions_deleted_at ON questions(deleted_at);
 CREATE INDEX IF NOT EXISTS idx_question_files_question_id ON question_files(question_id);
@@ -83,3 +104,7 @@ CREATE INDEX IF NOT EXISTS idx_question_difficulties_algorithm_tag_score
 CREATE INDEX IF NOT EXISTS idx_papers_deleted_at ON papers(deleted_at);
 CREATE INDEX IF NOT EXISTS idx_paper_questions_paper_id ON paper_questions(paper_id);
 CREATE INDEX IF NOT EXISTS idx_paper_questions_question_id ON paper_questions(question_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user ON refresh_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_active
+    ON refresh_tokens(expires_at) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);

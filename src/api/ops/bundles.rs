@@ -67,7 +67,8 @@ struct PaperBundleManifestItem {
     directory: String,
     metadata: PaperDetail,
     template_source: String,
-    append_file: BundleFileEntry,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    append_file: Option<BundleFileEntry>,
     main_tex_file: BundleFileEntry,
     assets: Vec<BundleFileEntry>,
     questions: Vec<PaperBundleQuestionManifestItem>,
@@ -103,7 +104,7 @@ struct QuestionBundleData {
 #[derive(Debug)]
 struct PaperBundleData {
     metadata: PaperDetail,
-    appendix: PaperAppendixData,
+    appendix: Option<PaperAppendixData>,
     questions: Vec<QuestionBundleData>,
 }
 
@@ -171,7 +172,8 @@ pub(crate) async fn build_paper_bundle_response(
         let bundle = load_paper_bundle_data(pool, paper_id).await?;
         let directory = bundle_directory_name(&bundle.metadata.description, paper_id);
         let append_file =
-            write_paper_appendix_file(pool, &mut writer, &bundle.appendix, &directory).await?;
+            write_paper_appendix_file(pool, &mut writer, bundle.appendix.as_ref(), &directory)
+                .await?;
         let rendered = render_paper_bundle(build_render_paper_input(pool, &bundle).await?)?;
 
         let main_tex_zip_path = format!("{directory}/main.tex");
@@ -269,21 +271,25 @@ async fn write_question_bundle_files(
 async fn write_paper_appendix_file(
     pool: &PgPool,
     writer: &mut ZipWriter<File>,
-    appendix: &PaperAppendixData,
+    appendix: Option<&PaperAppendixData>,
     directory: &str,
-) -> Result<BundleFileEntry> {
+) -> Result<Option<BundleFileEntry>> {
+    let Some(appendix) = appendix else {
+        return Ok(None);
+    };
+
     let zip_path = format!("{directory}/append.zip");
     let bytes = fetch_object_bytes(pool, &appendix.object_id).await?;
     write_bundle_file(writer, &zip_path, &bytes)?;
 
-    Ok(BundleFileEntry {
+    Ok(Some(BundleFileEntry {
         zip_path,
         original_path: appendix.original_file_name.clone(),
         file_kind: "appendix".to_string(),
         source_question_id: None,
         object_id: Some(appendix.object_id.clone()),
         mime_type: appendix.mime_type.clone(),
-    })
+    }))
 }
 
 fn write_bundle_file(writer: &mut ZipWriter<File>, zip_path: &str, bytes: &[u8]) -> Result<()> {
@@ -375,7 +381,7 @@ async fn load_paper_bundle_data(pool: &PgPool, paper_id: &str) -> Result<PaperBu
                to_char(p.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
                to_char(p.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at
         FROM papers p
-        JOIN objects o ON o.object_id = p.append_object_id
+        LEFT JOIN objects o ON o.object_id = p.append_object_id
         WHERE p.paper_id = $1::uuid AND p.deleted_at IS NULL
         "#,
     )
@@ -410,11 +416,15 @@ async fn load_paper_bundle_data(pool: &PgPool, paper_id: &str) -> Result<PaperBu
         questions.push(load_question_bundle_data(pool, &question_id).await?);
     }
 
-    let appendix = PaperAppendixData {
-        object_id: paper_row.get("append_object_id"),
-        original_file_name: paper_row.get("append_file_name"),
-        mime_type: paper_row.get("append_mime_type"),
-    };
+    let appendix = paper_row
+        .get::<Option<String>, _>("append_object_id")
+        .map(|object_id| PaperAppendixData {
+            object_id,
+            original_file_name: paper_row
+                .get::<Option<String>, _>("append_file_name")
+                .unwrap_or_else(|| "append.zip".to_string()),
+            mime_type: paper_row.get("append_mime_type"),
+        });
 
     Ok(PaperBundleData {
         metadata: map_paper_detail(paper_row, question_summaries),
