@@ -252,3 +252,30 @@
 
 - `400`: 尝试删除自己
 - `404`: 用户不存在
+
+### `POST /admin/users/{user_id}/reset-password`
+
+管理员重置指定用户的密码。重置后该用户的所有 refresh token 将被撤销，用户需要使用新密码重新登录。
+
+请求体：
+
+```json
+{
+  "new_password": "new-secure-password"
+}
+```
+
+- `new_password`: 必填，至少 6 个字符
+
+成功返回：
+
+```json
+{
+  "message": "password reset"
+}
+```
+
+错误：
+
+- `400`: 密码长度不足 6 个字符
+- `404`: 用户不存在
