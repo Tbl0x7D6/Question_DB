@@ -74,6 +74,36 @@ curl -X POST http://127.0.0.1:8080/papers \
 说明：
 
 - 只返回未软删除试卷
+- `questions` 数组中每个元素包含完整的题目元数据（`QuestionSummary`），字段包括：
+  `question_id`、`description`、`category`、`tags`、`status`、`score`、`difficulty`、`author`、`reviewers`、`created_at`、`updated_at`
+
+响应示例：
+
+```json
+{
+  "paper_id": "uuid",
+  "description": "综合训练试卷 A",
+  "title": "综合训练 2026 A 卷",
+  "subtitle": "校内选拔 初版",
+  "created_at": "2026-01-01T00:00:00.000Z",
+  "updated_at": "2026-01-01T00:00:00.000Z",
+  "questions": [
+    {
+      "question_id": "uuid",
+      "description": "题目描述",
+      "category": "T",
+      "tags": ["optics"],
+      "status": "reviewed",
+      "score": 20,
+      "difficulty": { "human": { "score": 7 } },
+      "author": "张三",
+      "reviewers": ["李四"],
+      "created_at": "2026-01-01T00:00:00.000Z",
+      "updated_at": "2026-01-01T00:00:00.000Z"
+    }
+  ]
+}
+```
 
 ### `PATCH /papers/{paper_id}`
 
